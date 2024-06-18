@@ -1,0 +1,19 @@
+#Fleetwood HP USB4 Dock G1
+[USB\VID_03F0&PID_0BAF]
+Plugin = hpi_cfu
+Vendor = HP Inc.
+HpiCfuVersionGetReport = 0x20
+HpiCfuOfferSetReport = 0x20
+HpiCfuOfferGetReport = 0x20
+HpiCfuContentSetReport = 0x20
+HpiCfuContentGetReport = 0x20
+
+#Hendrix HP USB4 Dock G5
+[USB\VID_03F0&PID_03B7]
+Plugin = hpi_cfu
+Vendor = HP Inc.
+HpiCfuVersionGetReport = 0x20
+HpiCfuOfferSetReport = 0x20
+HpiCfuOfferGetReport = 0x20
+HpiCfuContentSetReport = 0x20
+HpiCfuContentGetReport = 0x20
