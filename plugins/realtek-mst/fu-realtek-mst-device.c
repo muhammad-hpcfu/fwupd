@@ -257,8 +257,10 @@ mst_ensure_device_address(FuRealtekMstDevice *self, guint8 address, GError **err
 	return fu_udev_device_ioctl(FU_UDEV_DEVICE(self),
 				    I2C_SLAVE,
 				    (guint8 *)(guintptr)address,
+				    sizeof(guintptr),
 				    NULL,
 				    FU_REALTEK_MST_DEVICE_IOCTL_TIMEOUT,
+				    FU_UDEV_DEVICE_IOCTL_FLAG_NONE,
 				    error);
 }
 
@@ -942,7 +944,7 @@ fu_realtek_mst_device_init(FuRealtekMstDevice *self)
 	fu_device_set_summary(FU_DEVICE(self), "DisplayPort MST hub");
 	fu_device_add_icon(FU_DEVICE(self), "video-display");
 	fu_device_set_firmware_size(FU_DEVICE(self), FLASH_USER_SIZE);
-	fu_udev_device_add_flag(FU_UDEV_DEVICE(self), FU_UDEV_DEVICE_FLAG_OPEN_WRITE);
+	fu_udev_device_add_open_flag(FU_UDEV_DEVICE(self), FU_IO_CHANNEL_OPEN_FLAG_WRITE);
 }
 
 static void

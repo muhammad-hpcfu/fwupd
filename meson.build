@@ -96,6 +96,8 @@ warning_flags = [
   '-Wno-unknown-warning-option',
   '-Wno-unused-parameter',
   '-Wno-nonnull-compare',
+  '-Wno-analyzer-use-of-uninitialized-value', # incompatible with g_autoptr()
+  '-Wno-analyzer-fd-double-close',
   '-Wold-style-definition',
   '-Woverride-init',
   '-Wpointer-arith',
@@ -231,10 +233,17 @@ else
   lvfs_metadata_format = 'gz'
 endif
 conf.set_quoted('FU_LVFS_METADATA_FORMAT', lvfs_metadata_format)
-gusb = dependency('gusb', version: '>= 0.4.8', fallback: ['gusb', 'gusb_dep'], required: get_option('gusb'))
-if gusb.found()
-  conf.set('HAVE_GUSB', '1')
+
+# FreeBSD is missing some libusb symbols
+libusb = dependency('libusb-1.0', version : '>= 0.1.12')
+conf.set_quoted('LIBUSB_VERSION', libusb.version())
+if cc.has_header_symbol('libusb.h', 'libusb_set_option', dependencies: libusb)
+  conf.set('HAVE_LIBUSB_SET_OPTION', '1')
 endif
+if cc.has_header_symbol('libusb.h', 'libusb_get_parent', dependencies: libusb)
+  conf.set('HAVE_LIBUSB_GET_PARENT', '1')
+endif
+
 sqlite = dependency('sqlite3', required: get_option('sqlite'))
 if sqlite.found()
   conf.set('HAVE_SQLITE', '1')
@@ -271,14 +280,31 @@ if build_daemon
   if not polkit.found()
     warning('Polkit is disabled, the daemon will allow ALL client actions')
   endif
-  udevdir = get_option('udevdir')
-  if udevdir == '' and host_machine.system() == 'linux'
-    udev = dependency('udev')
-    udevdir = udev.get_variable(pkgconfig: 'udevdir')
-  endif
 endif
 libm = cc.find_library('m', required: false)
 zlib = dependency('zlib')
+
+fs = import('fs')
+
+# look for usb.ids in both of the Debian and Fedora locations,
+# and fall back to the system datadir in case we're building in a venv or prefix
+vendor_ids_dir = get_option('vendor_ids_dir')
+if vendor_ids_dir == ''
+  vendor_ids_dir = join_paths(datadir, 'misc')
+  if not fs.is_file(join_paths(vendor_ids_dir, 'usb.ids'))
+    vendor_ids_dir = join_paths(datadir, 'hwdata')
+  endif
+  if not fs.is_file(join_paths(vendor_ids_dir, 'usb.ids'))
+    vendor_ids_dir = '/usr/share/hwdata'
+  endif
+  if not fs.is_file(join_paths(vendor_ids_dir, 'usb.ids'))
+    vendor_ids_dir = '/usr/share/misc'
+  endif
+  if not fs.is_file(join_paths(vendor_ids_dir, 'usb.ids'))
+    error('could not auto-detect -Dvendor_ids_dir=')
+  endif
+endif
+conf.set_quoted ('FWUPD_DATADIR_VENDOR_IDS', vendor_ids_dir)
 
 bashcomp = dependency('bash-completion', required: false)
 python3path = get_option('python')
@@ -526,11 +552,6 @@ endif
 conf.set_quoted('FWUPD_LIBDIR_PKG', libdir_pkg)
 endif
 
-# sanity check, otherwise there is not point building
-if build_standalone and host_machine.system() == 'windows' and not gusb.found()
-  error('gusb feature is required for Windows build')
-endif
-
 conf.set_quoted('GETTEXT_PACKAGE', meson.project_name())
 conf.set_quoted('PACKAGE_NAME', meson.project_name())
 conf.set_quoted('VERSION', meson.project_version())
@@ -697,6 +718,7 @@ summary({
   'cbor': cbor,
   'consolekit': consolekit,
   'dbus_socket_address': get_option('dbus_socket_address'),
+  'vendor_ids_dir': vendor_ids_dir,
   'docs': build_docs,
   'elogind': elogind,
   'gnutls': gnutls,
@@ -714,7 +736,7 @@ summary({
 if build_daemon
   summary({
     'bluez': bluez.allowed(),
-    'gusb': gusb,
+    'libusb': libusb,
     'gudev': gudev,
     'hsi': hsi,
     'lvfs_metadata_format': lvfs_metadata_format,

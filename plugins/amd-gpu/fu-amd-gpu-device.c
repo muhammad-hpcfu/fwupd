@@ -88,12 +88,12 @@ fu_amd_gpu_device_probe(FuDevice *device, GError **error)
 	rom = g_build_filename(base, "rom", NULL);
 	if (!g_file_test(rom, G_FILE_TEST_EXISTS)) {
 		fu_device_add_internal_flag(device, FU_DEVICE_INTERNAL_FLAG_HOST_CPU_CHILD);
-		fu_udev_device_add_flag(FU_UDEV_DEVICE(device), FU_UDEV_DEVICE_FLAG_OPEN_READ);
+		fu_udev_device_add_open_flag(FU_UDEV_DEVICE(device), FU_IO_CHANNEL_OPEN_FLAG_READ);
 		fu_device_add_flag(device, FWUPD_DEVICE_FLAG_INTERNAL);
 	} else {
 		fu_device_set_logical_id(device, "rom");
 		fu_device_add_flag(device, FWUPD_DEVICE_FLAG_CAN_VERIFY_IMAGE);
-		fu_udev_device_add_flag(FU_UDEV_DEVICE(device), FU_UDEV_DEVICE_FLAG_OPEN_READ);
+		fu_udev_device_add_open_flag(FU_UDEV_DEVICE(device), FU_IO_CHANNEL_OPEN_FLAG_READ);
 		fu_udev_device_add_flag(FU_UDEV_DEVICE(device),
 					FU_UDEV_DEVICE_FLAG_VENDOR_FROM_PARENT);
 	}
@@ -156,8 +156,10 @@ fu_amd_gpu_device_setup(FuDevice *device, GError **error)
 	if (!fu_udev_device_ioctl(FU_UDEV_DEVICE(device),
 				  DRM_IOCTL_AMDGPU_INFO,
 				  (void *)&request,
+				  sizeof(request),
 				  NULL,
 				  1000,
+				  FU_UDEV_DEVICE_IOCTL_FLAG_NONE,
 				  error))
 		return FALSE;
 	self->vbios_pn =
@@ -227,7 +229,7 @@ fu_amd_gpu_device_wait_for_completion_cb(FuDevice *device, gpointer user_data, G
 	psp_vbflash_status = g_build_filename(base, "psp_vbflash_status", NULL);
 	if (!g_file_get_contents(psp_vbflash_status, &buf, &sz, error))
 		return FALSE;
-	if (!fu_strtoull(buf, &status, 0, G_MAXUINT64, error))
+	if (!fu_strtoull(buf, &status, 0, G_MAXUINT64, FU_INTEGER_BASE_AUTO, error))
 		return FALSE;
 	if (status != PSPVBFLASH_SUCCESS) {
 		g_set_error(error,
@@ -257,7 +259,10 @@ fu_amd_gpu_device_write_firmware(FuDevice *device,
 	base = fu_udev_device_get_sysfs_path(FU_UDEV_DEVICE(device));
 	psp_vbflash = g_build_filename(base, "psp_vbflash", NULL);
 
-	image_io = fu_io_channel_new_file(psp_vbflash, error);
+	image_io =
+	    fu_io_channel_new_file(psp_vbflash,
+				   FU_IO_CHANNEL_OPEN_FLAG_READ | FU_IO_CHANNEL_OPEN_FLAG_WRITE,
+				   error);
 	if (image_io == NULL)
 		return FALSE;
 

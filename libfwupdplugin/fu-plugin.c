@@ -509,7 +509,8 @@ fu_plugin_device_add(FuPlugin *self, FuDevice *device)
 	}
 
 	g_debug("emit added from %s: %s", fu_plugin_get_name(self), fu_device_get_id(device));
-	fu_device_set_created(device, (guint64)g_get_real_time() / G_USEC_PER_SEC);
+	if (fu_device_get_created_usec(device) == 0)
+		fu_device_set_created_usec(device, g_get_real_time());
 	fu_device_set_plugin(device, fu_plugin_get_name(self));
 	g_signal_emit(self, signals[SIGNAL_DEVICE_ADDED], 0, device);
 
@@ -517,7 +518,7 @@ fu_plugin_device_add(FuPlugin *self, FuDevice *device)
 	children = fu_device_get_children(device);
 	for (guint i = 0; i < children->len; i++) {
 		FuDevice *child = g_ptr_array_index(children, i);
-		if (fu_device_get_created(child) == 0)
+		if (fu_device_get_created_usec(child) == 0)
 			fu_plugin_device_add(self, child);
 	}
 
@@ -720,9 +721,12 @@ fu_plugin_device_write_firmware(FuPlugin *self,
 {
 	FuDevice *proxy = fu_device_get_proxy_with_fallback(device);
 	g_autoptr(FuDeviceLocker) locker = NULL;
+
 	locker = fu_device_locker_new(proxy, error);
-	if (locker == NULL)
+	if (locker == NULL) {
+		g_prefix_error(error, "failed to open device: ");
 		return FALSE;
+	}
 
 	/* back the old firmware up to /var/lib/fwupd */
 	if (fu_device_has_flag(device, FWUPD_DEVICE_FLAG_BACKUP_BEFORE_INSTALL)) {
@@ -2104,7 +2108,7 @@ fu_plugin_runner_activate(FuPlugin *self, FuDevice *device, FuProgress *progress
 
 	/* update with correct flags */
 	fu_device_remove_flag(device, FWUPD_DEVICE_FLAG_NEEDS_ACTIVATION);
-	fu_device_set_modified(device, (guint64)g_get_real_time() / G_USEC_PER_SEC);
+	fu_device_set_modified_usec(device, g_get_real_time());
 	return TRUE;
 }
 
@@ -2151,7 +2155,7 @@ fu_plugin_runner_unlock(FuPlugin *self, FuDevice *device, GError **error)
 
 	/* update with correct flags */
 	fu_device_remove_flag(device, FWUPD_DEVICE_FLAG_LOCKED);
-	fu_device_set_modified(device, (guint64)g_get_real_time() / G_USEC_PER_SEC);
+	fu_device_set_modified_usec(device, g_get_real_time());
 	return TRUE;
 }
 
@@ -2589,11 +2593,21 @@ fu_plugin_get_config_value(FuPlugin *self, const gchar *key)
 {
 	FuPluginPrivate *priv = fu_plugin_get_instance_private(self);
 	FuConfig *config = fu_context_get_config(priv->ctx);
+	const gchar *name;
+
+	g_return_val_if_fail(FU_IS_PLUGIN(self), NULL);
+	g_return_val_if_fail(key != NULL, NULL);
+
 	if (config == NULL) {
 		g_critical("cannot get config value with no loaded context!");
 		return NULL;
 	}
-	return fu_config_get_value(config, fu_plugin_get_name(self), key);
+	name = fu_plugin_get_name(self);
+	if (name == NULL) {
+		g_critical("cannot get config value with no plugin name!");
+		return NULL;
+	}
+	return fu_config_get_value(config, name, key);
 }
 
 /**
@@ -2611,11 +2625,21 @@ fu_plugin_set_config_default(FuPlugin *self, const gchar *key, const gchar *valu
 {
 	FuPluginPrivate *priv = fu_plugin_get_instance_private(self);
 	FuConfig *config = fu_context_get_config(priv->ctx);
+	const gchar *name;
+
+	g_return_if_fail(FU_IS_PLUGIN(self));
+	g_return_if_fail(key != NULL);
+
 	if (config == NULL) {
 		g_critical("cannot set config default with no loaded context!");
 		return;
 	}
-	fu_config_set_default(config, fu_plugin_get_name(self), key, value);
+	name = fu_plugin_get_name(self);
+	if (name == NULL) {
+		g_critical("cannot set config default with no plugin name!");
+		return;
+	}
+	fu_config_set_default(config, name, key, value);
 }
 
 /**
@@ -2661,9 +2685,12 @@ fu_plugin_set_config_value(FuPlugin *self, const gchar *key, const gchar *value,
 {
 	FuPluginPrivate *priv = fu_plugin_get_instance_private(self);
 	FuConfig *config = fu_context_get_config(priv->ctx);
+	const gchar *name;
+
 	g_return_val_if_fail(FU_IS_PLUGIN(self), FALSE);
 	g_return_val_if_fail(key != NULL, FALSE);
 	g_return_val_if_fail(error == NULL || *error == NULL, FALSE);
+
 	if (config == NULL) {
 		g_set_error_literal(error,
 				    FWUPD_ERROR,
@@ -2671,7 +2698,12 @@ fu_plugin_set_config_value(FuPlugin *self, const gchar *key, const gchar *value,
 				    "cannot get config value with no loaded context");
 		return FALSE;
 	}
-	return fu_config_set_value(config, fu_plugin_get_name(self), key, value, error);
+	name = fu_plugin_get_name(self);
+	if (name == NULL) {
+		g_critical("cannot get config value with no plugin name!");
+		return FALSE;
+	}
+	return fu_config_set_value(config, name, key, value, error);
 }
 
 /**
@@ -2690,8 +2722,11 @@ fu_plugin_reset_config_values(FuPlugin *self, GError **error)
 {
 	FuPluginPrivate *priv = fu_plugin_get_instance_private(self);
 	FuConfig *config = fu_context_get_config(priv->ctx);
+	const gchar *name;
+
 	g_return_val_if_fail(FU_IS_PLUGIN(self), FALSE);
 	g_return_val_if_fail(error == NULL || *error == NULL, FALSE);
+
 	if (config == NULL) {
 		g_set_error_literal(error,
 				    FWUPD_ERROR,
@@ -2699,7 +2734,12 @@ fu_plugin_reset_config_values(FuPlugin *self, GError **error)
 				    "cannot reset config values with no loaded context");
 		return FALSE;
 	}
-	return fu_config_reset_defaults(config, fu_plugin_get_name(self), error);
+	name = fu_plugin_get_name(self);
+	if (name == NULL) {
+		g_critical("cannot reset config values with no plugin name!");
+		return FALSE;
+	}
+	return fu_config_reset_defaults(config, name, error);
 }
 
 /**
@@ -2718,11 +2758,21 @@ fu_plugin_get_config_value_boolean(FuPlugin *self, const gchar *key)
 {
 	FuPluginPrivate *priv = fu_plugin_get_instance_private(self);
 	FuConfig *config = fu_context_get_config(priv->ctx);
+	const gchar *name;
+
+	g_return_val_if_fail(FU_IS_PLUGIN(self), FALSE);
+	g_return_val_if_fail(key != NULL, FALSE);
+
 	if (config == NULL) {
 		g_critical("cannot get config value with no loaded context!");
 		return FALSE;
 	}
-	return fu_config_get_value_bool(config, fu_plugin_get_name(self), key);
+	name = fu_plugin_get_name(self);
+	if (name == NULL) {
+		g_critical("cannot get config value with no plugin name!");
+		return FALSE;
+	}
+	return fu_config_get_value_bool(config, name, key);
 }
 
 /**
@@ -2825,12 +2875,27 @@ fu_plugin_set_property(GObject *object, guint prop_id, const GValue *value, GPar
 }
 
 static void
+fu_plugin_dispose(GObject *object)
+{
+	FuPlugin *self = FU_PLUGIN(object);
+	FuPluginPrivate *priv = GET_PRIVATE(self);
+
+	if (priv->devices != NULL)
+		g_ptr_array_set_size(priv->devices, 0);
+	if (priv->cache != NULL)
+		g_hash_table_remove_all(priv->cache);
+
+	G_OBJECT_CLASS(fu_plugin_parent_class)->dispose(object);
+}
+
+static void
 fu_plugin_class_init(FuPluginClass *klass)
 {
 	GObjectClass *object_class = G_OBJECT_CLASS(klass);
 	GParamSpec *pspec;
 
 	object_class->finalize = fu_plugin_finalize;
+	object_class->dispose = fu_plugin_dispose;
 	object_class->get_property = fu_plugin_get_property;
 	object_class->set_property = fu_plugin_set_property;
 

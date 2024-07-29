@@ -402,17 +402,15 @@ fu_dell_dock_mst_rc_command(FuDevice *device,
 static MSTType
 fu_dell_dock_mst_check_type(FuDevice *device)
 {
-	GPtrArray *instance_ids;
-	const gchar *tmp = NULL;
+	FuDevice *parent = fu_device_get_parent(device);
+	DockBaseType dock_type = fu_dell_dock_get_dock_type(parent);
 
-	instance_ids = fu_device_get_instance_ids(device);
-	for (guint i = 0; i < instance_ids->len; i++) {
-		tmp = g_ptr_array_index(instance_ids, i);
-		if (g_strcmp0(tmp, DELL_DOCK_VMM6210_INSTANCE_ID) == 0)
-			return Cayenne_mst;
-		if (g_strcmp0(tmp, DELL_DOCK_VM5331_INSTANCE_ID) == 0)
-			return Panamera_mst;
-	}
+	if (dock_type == DOCK_BASE_TYPE_SALOMON)
+		return Panamera_mst;
+
+	if (dock_type == DOCK_BASE_TYPE_ATOMIC)
+		return Cayenne_mst;
+
 	return Unknown;
 }
 
@@ -1103,31 +1101,31 @@ fu_dell_dock_mst_set_quirk_kv(FuDevice *device,
 	guint64 tmp = 0;
 
 	if (g_strcmp0(key, "DellDockUnlockTarget") == 0) {
-		if (!fu_strtoull(value, &tmp, 0, G_MAXUINT8, error))
+		if (!fu_strtoull(value, &tmp, 0, G_MAXUINT8, FU_INTEGER_BASE_AUTO, error))
 			return FALSE;
 		self->unlock_target = tmp;
 		return TRUE;
 	}
 	if (g_strcmp0(key, "DellDockBlobMajorOffset") == 0) {
-		if (!fu_strtoull(value, &tmp, 0, G_MAXUINT32, error))
+		if (!fu_strtoull(value, &tmp, 0, G_MAXUINT32, FU_INTEGER_BASE_AUTO, error))
 			return FALSE;
 		self->blob_major_offset = tmp;
 		return TRUE;
 	}
 	if (g_strcmp0(key, "DellDockBlobMinorOffset") == 0) {
-		if (!fu_strtoull(value, &tmp, 0, G_MAXUINT32, error))
+		if (!fu_strtoull(value, &tmp, 0, G_MAXUINT32, FU_INTEGER_BASE_AUTO, error))
 			return FALSE;
 		self->blob_minor_offset = tmp;
 		return TRUE;
 	}
 	if (g_strcmp0(key, "DellDockBlobBuildOffset") == 0) {
-		if (!fu_strtoull(value, &tmp, 0, G_MAXUINT32, error))
+		if (!fu_strtoull(value, &tmp, 0, G_MAXUINT32, FU_INTEGER_BASE_AUTO, error))
 			return FALSE;
 		self->blob_build_offset = tmp;
 		return TRUE;
 	}
 	if (g_strcmp0(key, "DellDockInstallDurationI2C") == 0) {
-		if (!fu_strtoull(value, &tmp, 0, 60 * 60 * 24, error))
+		if (!fu_strtoull(value, &tmp, 0, 60 * 60 * 24, FU_INTEGER_BASE_AUTO, error))
 			return FALSE;
 		fu_device_set_install_duration(device, tmp);
 		return TRUE;
@@ -1244,6 +1242,7 @@ fu_dell_dock_mst_init(FuDellDockMst *self)
 {
 	fu_device_add_protocol(FU_DEVICE(self), "com.synaptics.mst");
 	fu_device_add_flag(FU_DEVICE(self), FWUPD_DEVICE_FLAG_UPDATABLE);
+	fu_device_add_flag(FU_DEVICE(self), FWUPD_DEVICE_FLAG_SIGNED_PAYLOAD);
 }
 
 static void

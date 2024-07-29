@@ -73,43 +73,43 @@ fu_logitech_bulkcontroller_device_probe(FuDevice *device, GError **error)
 	FuLogitechBulkcontrollerDevice *self = FU_LOGITECH_BULKCONTROLLER_DEVICE(device);
 	g_autoptr(GPtrArray) intfs = NULL;
 
-	intfs = g_usb_device_get_interfaces(fu_usb_device_get_dev(FU_USB_DEVICE(self)), error);
+	intfs = fu_usb_device_get_interfaces(FU_USB_DEVICE(self), error);
 	if (intfs == NULL)
 		return FALSE;
 	for (guint i = 0; i < intfs->len; i++) {
-		GUsbInterface *intf = g_ptr_array_index(intfs, i);
-		if (g_usb_interface_get_class(intf) == G_USB_DEVICE_CLASS_VENDOR_SPECIFIC &&
-		    g_usb_interface_get_protocol(intf) == 0x1) {
-			if (g_usb_interface_get_subclass(intf) == SYNC_INTERFACE_SUBPROTOCOL_ID) {
+		FuUsbInterface *intf = g_ptr_array_index(intfs, i);
+		if (fu_usb_interface_get_class(intf) == FU_USB_CLASS_VENDOR_SPECIFIC &&
+		    fu_usb_interface_get_protocol(intf) == 0x1) {
+			if (fu_usb_interface_get_subclass(intf) == SYNC_INTERFACE_SUBPROTOCOL_ID) {
 				g_autoptr(GPtrArray) endpoints =
-				    g_usb_interface_get_endpoints(intf);
-				self->sync_iface = g_usb_interface_get_number(intf);
+				    fu_usb_interface_get_endpoints(intf);
+				self->sync_iface = fu_usb_interface_get_number(intf);
 				if (endpoints == NULL)
 					continue;
 				for (guint j = 0; j < endpoints->len; j++) {
-					GUsbEndpoint *ep = g_ptr_array_index(endpoints, j);
+					FuUsbEndpoint *ep = g_ptr_array_index(endpoints, j);
 					if (j == EP_OUT)
 						self->sync_ep[EP_OUT] =
-						    g_usb_endpoint_get_address(ep);
+						    fu_usb_endpoint_get_address(ep);
 					else
 						self->sync_ep[EP_IN] =
-						    g_usb_endpoint_get_address(ep);
+						    fu_usb_endpoint_get_address(ep);
 				}
-			} else if (g_usb_interface_get_subclass(intf) ==
+			} else if (fu_usb_interface_get_subclass(intf) ==
 				   UPD_INTERFACE_SUBPROTOCOL_ID) {
 				g_autoptr(GPtrArray) endpoints =
-				    g_usb_interface_get_endpoints(intf);
-				self->update_iface = g_usb_interface_get_number(intf);
+				    fu_usb_interface_get_endpoints(intf);
+				self->update_iface = fu_usb_interface_get_number(intf);
 				if (endpoints == NULL)
 					continue;
 				for (guint j = 0; j < endpoints->len; j++) {
-					GUsbEndpoint *ep = g_ptr_array_index(endpoints, j);
+					FuUsbEndpoint *ep = g_ptr_array_index(endpoints, j);
 					if (j == EP_OUT)
 						self->update_ep[EP_OUT] =
-						    g_usb_endpoint_get_address(ep);
+						    fu_usb_endpoint_get_address(ep);
 					else
 						self->update_ep[EP_IN] =
-						    g_usb_endpoint_get_address(ep);
+						    fu_usb_endpoint_get_address(ep);
 				}
 			}
 		}
@@ -142,14 +142,14 @@ fu_logitech_bulkcontroller_device_send(FuLogitechBulkcontrollerDevice *self,
 		return FALSE;
 	}
 	fu_dump_full(G_LOG_DOMAIN, "request", buf, bufsz, 20, FU_DUMP_FLAGS_SHOW_ASCII);
-	if (!g_usb_device_bulk_transfer(fu_usb_device_get_dev(FU_USB_DEVICE(self)),
-					ep,
-					buf,
-					bufsz,
-					NULL, /* transferred */
-					BULK_TRANSFER_TIMEOUT,
-					NULL,
-					error)) {
+	if (!fu_usb_device_bulk_transfer(FU_USB_DEVICE(self),
+					 ep,
+					 buf,
+					 bufsz,
+					 NULL, /* transferred */
+					 BULK_TRANSFER_TIMEOUT,
+					 NULL,
+					 error)) {
 		g_prefix_error(error, "failed to send using bulk transfer: ");
 		fu_error_convert(error);
 		return FALSE;
@@ -182,16 +182,15 @@ fu_logitech_bulkcontroller_device_recv(FuLogitechBulkcontrollerDevice *self,
 		return FALSE;
 	}
 	g_debug("read response");
-	if (!g_usb_device_bulk_transfer(fu_usb_device_get_dev(FU_USB_DEVICE(self)),
-					ep,
-					buf,
-					bufsz,
-					&actual_length,
-					timeout,
-					NULL,
-					error)) {
-		g_prefix_error(error, "failed to receive using bulk transfer: ");
-		fu_error_convert(error);
+	if (!fu_usb_device_bulk_transfer(FU_USB_DEVICE(self),
+					 ep,
+					 buf,
+					 bufsz,
+					 &actual_length,
+					 timeout,
+					 NULL,
+					 error)) {
+		g_prefix_error(error, "failed to receive: ");
 		return FALSE;
 	}
 	fu_dump_full(G_LOG_DOMAIN, "response", buf, actual_length, 20, FU_DUMP_FLAGS_SHOW_ASCII);
@@ -407,7 +406,12 @@ fu_logitech_bulkcontroller_device_sync_check_ack_cmd(GByteArray *buf,
 		return FALSE;
 	}
 	fu_dump_raw(G_LOG_DOMAIN, "ack_payload", (guint8 *)ack_payload, sizeof(ack_payload));
-	if (!fu_strtoull((const gchar *)ack_payload, &ack_cmd, 0, G_MAXUINT32, error)) {
+	if (!fu_strtoull((const gchar *)ack_payload,
+			 &ack_cmd,
+			 0,
+			 G_MAXUINT32,
+			 FU_INTEGER_BASE_AUTO,
+			 error)) {
 		g_prefix_error(error, "failed to parse ack payload cmd: ");
 		return FALSE;
 	}

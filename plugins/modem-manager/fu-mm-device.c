@@ -477,14 +477,21 @@ fu_mm_device_probe_default(FuDevice *device, GError **error)
 		} else if (!g_file_get_contents(path, &value_str, NULL, &error_local)) {
 			g_warning("failed to set vendor ID: %s", error_local->message);
 		} else {
-			guint64 value_int;
+			guint64 value_int = 0;
+			g_autoptr(GError) error_local2 = NULL;
 
 			/* note: the string value may be prefixed with '0x' (e.g. when reading
 			 * the PCI 'vendor' attribute, or not prefixed with anything, as in the
 			 * USB 'idVendor' attribute. */
-			value_int = g_ascii_strtoull(value_str, NULL, 16);
-			if (value_int > G_MAXUINT16) {
-				g_warning("failed to set vendor ID: invalid value: %s", value_str);
+			if (!fu_strtoull(value_str,
+					 &value_int,
+					 0,
+					 G_MAXUINT16,
+					 FU_INTEGER_BASE_16,
+					 &error_local2)) {
+				g_warning("failed to set vendor ID %s: %s",
+					  value_str,
+					  error_local2->message);
 			} else {
 				g_autofree gchar *vendor_id =
 				    g_strdup_printf("%s:0x%04X", device_bus, (guint)value_int);
@@ -552,7 +559,10 @@ fu_mm_device_io_open_qcdm(FuMmDevice *self, GError **error)
 	}
 
 	/* open device */
-	self->io_channel = fu_io_channel_new_file(self->port_qcdm, error);
+	self->io_channel =
+	    fu_io_channel_new_file(self->port_qcdm,
+				   FU_IO_CHANNEL_OPEN_FLAG_READ | FU_IO_CHANNEL_OPEN_FLAG_WRITE,
+				   error);
 	if (self->io_channel == NULL)
 		return FALSE;
 
@@ -791,7 +801,10 @@ fu_mm_device_io_open(FuMmDevice *self, GError **error)
 	}
 
 	/* open device */
-	self->io_channel = fu_io_channel_new_file(self->port_at, error);
+	self->io_channel =
+	    fu_io_channel_new_file(self->port_at,
+				   FU_IO_CHANNEL_OPEN_FLAG_READ | FU_IO_CHANNEL_OPEN_FLAG_WRITE,
+				   error);
 	if (self->io_channel == NULL)
 		return FALSE;
 
@@ -1157,15 +1170,10 @@ fu_mm_device_get_firmware_version_mbim(FuDevice *device, GError **error)
 static gboolean
 fu_mm_device_writeln(const gchar *fn, const gchar *buf, GError **error)
 {
-	int fd;
 	g_autoptr(FuIOChannel) io = NULL;
-
-	fd = open(fn, O_WRONLY);
-	if (fd < 0) {
-		g_set_error(error, FWUPD_ERROR, FWUPD_ERROR_INVALID_FILE, "could not open %s", fn);
+	io = fu_io_channel_new_file(fn, FU_IO_CHANNEL_OPEN_FLAG_WRITE, error);
+	if (io == NULL)
 		return FALSE;
-	}
-	io = fu_io_channel_unix_new(fd);
 	return fu_io_channel_write_raw(io,
 				       (const guint8 *)buf,
 				       strlen(buf),

@@ -170,8 +170,10 @@ fu_nordic_hid_cfg_channel_send(FuNordicHidCfgChannel *self,
 	if (!fu_udev_device_ioctl(udev_device,
 				  HIDIOCSFEATURE(bufsz),
 				  buf,
+				  bufsz,
 				  NULL,
 				  FU_NORDIC_HID_CFG_CHANNEL_IOCTL_TIMEOUT,
+				  FU_UDEV_DEVICE_IOCTL_FLAG_NONE,
 				  error))
 		return FALSE;
 	return TRUE;
@@ -201,8 +203,10 @@ fu_nordic_hid_cfg_channel_receive(FuNordicHidCfgChannel *self,
 		if (!fu_udev_device_ioctl(udev_device,
 					  HIDIOCGFEATURE(sizeof(*recv_msg)),
 					  (guint8 *)recv_msg,
+					  sizeof(*recv_msg),
 					  NULL,
 					  FU_NORDIC_HID_CFG_CHANNEL_IOCTL_TIMEOUT,
+					  FU_UDEV_DEVICE_IOCTL_FLAG_NONE,
 					  error))
 			return FALSE;
 		/* if the device is busy it return 06 00 00 00 00 response */
@@ -1576,6 +1580,7 @@ fu_nordic_hid_cfg_channel_write_firmware(FuDevice *device,
 	FuNordicHidCfgChannel *self = FU_NORDIC_HID_CFG_CHANNEL(device);
 	gsize streamsz = 0;
 	guint32 checksum;
+	guint64 val = 0;
 	g_autofree gchar *csum_str = NULL;
 	g_autofree gchar *image_id = NULL;
 	g_autoptr(GInputStream) stream = NULL;
@@ -1593,7 +1598,9 @@ fu_nordic_hid_cfg_channel_write_firmware(FuDevice *device,
 	if (csum_str == NULL)
 		return FALSE;
 	/* expecting checksum string in hex */
-	checksum = g_ascii_strtoull(csum_str, NULL, 16);
+	if (!fu_strtoull(csum_str, &val, 0, G_MAXUINT32, FU_INTEGER_BASE_16, error))
+		return FALSE;
+	checksum = (guint32)val;
 
 	/* progress */
 	fu_progress_set_id(progress, G_STRLOC);
@@ -1706,6 +1713,8 @@ fu_nordic_hid_cfg_channel_init(FuNordicHidCfgChannel *self)
 	fu_device_add_protocol(FU_DEVICE(self), "com.nordic.hidcfgchannel");
 	fu_device_retry_set_delay(FU_DEVICE(self), FU_NORDIC_HID_CFG_CHANNEL_RETRY_DELAY);
 	fu_device_set_firmware_gtype(FU_DEVICE(self), FU_TYPE_NORDIC_HID_ARCHIVE);
+	fu_udev_device_add_open_flag(FU_UDEV_DEVICE(self), FU_IO_CHANNEL_OPEN_FLAG_READ);
+	fu_udev_device_add_open_flag(FU_UDEV_DEVICE(self), FU_IO_CHANNEL_OPEN_FLAG_WRITE);
 }
 
 static FuNordicHidCfgChannel *

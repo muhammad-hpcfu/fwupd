@@ -268,48 +268,66 @@ fu_path_from_kind(FuPathKind path_kind)
 		if (tmp != NULL)
 			return g_strdup(tmp);
 		return g_strdup("/proc");
+	/* /sys */
+	case FU_PATH_KIND_SYSFSDIR:
+		tmp = g_getenv("FWUPD_SYSFSDIR");
+		if (tmp != NULL)
+			return g_strdup(tmp);
+		return g_strdup("/sys");
 	/* /sys/firmware */
 	case FU_PATH_KIND_SYSFSDIR_FW:
 		tmp = g_getenv("FWUPD_SYSFSFWDIR");
 		if (tmp != NULL)
 			return g_strdup(tmp);
-		return g_strdup("/sys/firmware");
+		basedir = fu_path_from_kind(FU_PATH_KIND_SYSFSDIR);
+		return g_build_filename(basedir, "firmware", NULL);
 	/* /sys/class/tpm */
 	case FU_PATH_KIND_SYSFSDIR_TPM:
 		tmp = g_getenv("FWUPD_SYSFSTPMDIR");
 		if (tmp != NULL)
 			return g_strdup(tmp);
-		return g_strdup("/sys/class/tpm");
+		basedir = fu_path_from_kind(FU_PATH_KIND_SYSFSDIR);
+		return g_build_filename(basedir, "class", "tpm", NULL);
 	/* /sys/bus/platform/drivers */
 	case FU_PATH_KIND_SYSFSDIR_DRIVERS:
 		tmp = g_getenv("FWUPD_SYSFSDRIVERDIR");
 		if (tmp != NULL)
 			return g_strdup(tmp);
-		return g_strdup("/sys/bus/platform/drivers");
+		basedir = fu_path_from_kind(FU_PATH_KIND_SYSFSDIR);
+		return g_build_filename(basedir, "bus", "platform", "drivers", NULL);
 	/* /sys/kernel/security */
 	case FU_PATH_KIND_SYSFSDIR_SECURITY:
 		tmp = g_getenv("FWUPD_SYSFSSECURITYDIR");
 		if (tmp != NULL)
 			return g_strdup(tmp);
-		return g_strdup("/sys/kernel/security");
+		basedir = fu_path_from_kind(FU_PATH_KIND_SYSFSDIR);
+		return g_build_filename(basedir, "kernel", "security", NULL);
 	/* /sys/class/dmi/id */
 	case FU_PATH_KIND_SYSFSDIR_DMI:
 		tmp = g_getenv("FWUPD_SYSFSDMIDIR");
 		if (tmp != NULL)
 			return g_strdup(tmp);
-		return g_strdup("/sys/class/dmi/id");
+		basedir = fu_path_from_kind(FU_PATH_KIND_SYSFSDIR);
+		return g_build_filename(basedir, "class", "dmi", "id", NULL);
 	/* /sys/firmware/acpi/tables */
 	case FU_PATH_KIND_ACPI_TABLES:
 		tmp = g_getenv("FWUPD_ACPITABLESDIR");
 		if (tmp != NULL)
 			return g_strdup(tmp);
-		return g_strdup("/sys/firmware/acpi/tables");
+		basedir = fu_path_from_kind(FU_PATH_KIND_SYSFSDIR);
+		return g_build_filename(basedir, "firmware", "acpi", "tables", NULL);
 	/* /sys/module/firmware_class/parameters/path */
 	case FU_PATH_KIND_FIRMWARE_SEARCH:
 		tmp = g_getenv("FWUPD_FIRMWARESEARCH");
 		if (tmp != NULL)
 			return g_strdup(tmp);
-		return g_strdup("/sys/module/firmware_class/parameters/path");
+		basedir = fu_path_from_kind(FU_PATH_KIND_SYSFSDIR);
+		return g_build_filename(basedir,
+					"module",
+					"firmware_class",
+					"parameters",
+					"path",
+					NULL);
 	/* /etc */
 	case FU_PATH_KIND_SYSCONFDIR:
 		tmp = g_getenv("FWUPD_SYSCONFDIR");
@@ -364,6 +382,15 @@ fu_path_from_kind(FuPathKind path_kind)
 		if (tmp != NULL)
 			return g_build_filename(tmp, FWUPD_LIBEXECDIR, PACKAGE_NAME, NULL);
 		return g_build_filename(FWUPD_LIBEXECDIR, PACKAGE_NAME, NULL);
+	/* /usr/share/hwdata */
+	case FU_PATH_KIND_DATADIR_VENDOR_IDS:
+		tmp = g_getenv("FWUPD_DATADIR_VENDOR_IDS");
+		if (tmp != NULL)
+			return g_strdup(tmp);
+		tmp = g_getenv("SNAP");
+		if (tmp != NULL)
+			return g_build_filename(tmp, FWUPD_DATADIR_VENDOR_IDS, NULL);
+		return g_strdup(FWUPD_DATADIR_VENDOR_IDS);
 	/* /usr/share/fwupd/quirks.d */
 	case FU_PATH_KIND_DATADIR_QUIRKS:
 		tmp = g_getenv("FWUPD_DATADIR_QUIRKS");
@@ -446,7 +473,8 @@ fu_path_from_kind(FuPathKind path_kind)
 		tmp = g_getenv("FWUPD_SYSFSFWATTRIBDIR");
 		if (tmp != NULL)
 			return g_strdup(tmp);
-		return g_strdup("/sys/class/firmware-attributes");
+		basedir = fu_path_from_kind(FU_PATH_KIND_SYSFSDIR);
+		return g_build_filename(basedir, "class", "firmware-attributes", NULL);
 	case FU_PATH_KIND_OFFLINE_TRIGGER:
 		tmp = g_getenv("FWUPD_OFFLINE_TRIGGER");
 		if (tmp != NULL)
@@ -546,4 +574,46 @@ fu_path_glob(const gchar *directory, const gchar *pattern, GError **error)
 	}
 	g_ptr_array_sort(files, fu_path_glob_sort_cb);
 	return g_steal_pointer(&files);
+}
+
+/**
+ * fu_path_make_absolute:
+ * @filename: a path to a filename, perhaps symlinked
+ * @error: (nullable): optional return location for an error
+ *
+ * Returns the resolved absolute file name.
+ *
+ * Returns: (transfer full): path, or %NULL on error
+ *
+ * Since: 2.0.0
+ **/
+gchar *
+fu_path_make_absolute(const gchar *filename, GError **error)
+{
+	char full_tmp[PATH_MAX];
+
+	g_return_val_if_fail(filename != NULL, NULL);
+	g_return_val_if_fail(error == NULL || *error == NULL, NULL);
+
+#ifdef HAVE_REALPATH
+	if (realpath(filename, full_tmp) == NULL) {
+#else
+	if (_fullpath(full_tmp, filename, sizeof(full_tmp)) == NULL) {
+#endif
+		g_set_error(error,
+			    FWUPD_ERROR,
+			    FWUPD_ERROR_INVALID_DATA,
+			    "cannot resolve path: %s",
+			    g_strerror(errno));
+		return NULL;
+	}
+	if (!g_file_test(full_tmp, G_FILE_TEST_EXISTS)) {
+		g_set_error(error,
+			    FWUPD_ERROR,
+			    FWUPD_ERROR_INVALID_DATA,
+			    "cannot find path: %s",
+			    full_tmp);
+		return NULL;
+	}
+	return g_strdup(full_tmp);
 }

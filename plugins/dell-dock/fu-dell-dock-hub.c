@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Dell Inc.
+ * Copyright 2024 Dell Inc.
  * All rights reserved.
  *
  * This software and associated documentation (if any) is furnished
@@ -25,23 +25,6 @@ struct _FuDellDockHub {
 };
 
 G_DEFINE_TYPE(FuDellDockHub, fu_dell_dock_hub, FU_TYPE_HID_DEVICE)
-
-void
-fu_dell_dock_hub_add_instance(FuDevice *device, guint8 dock_type)
-{
-	g_autofree gchar *devid = NULL;
-
-	if (dock_type == DOCK_BASE_TYPE_ATOMIC) {
-		devid = g_strdup_printf("USB\\VID_%04X&PID_%04X&atomic_hub",
-					(guint)fu_usb_device_get_vid(FU_USB_DEVICE(device)),
-					(guint)fu_usb_device_get_pid(FU_USB_DEVICE(device)));
-	} else {
-		devid = g_strdup_printf("USB\\VID_%04X&PID_%04X&hub",
-					(guint)fu_usb_device_get_vid(FU_USB_DEVICE(device)),
-					(guint)fu_usb_device_get_pid(FU_USB_DEVICE(device)));
-	}
-	fu_device_add_instance_id(device, devid);
-}
 
 static gboolean
 fu_dell_dock_hub_probe(FuDevice *device, GError **error)
@@ -140,6 +123,10 @@ fu_dell_dock_hub_setup(FuDevice *device, GError **error)
 	/* FuUsbDevice->setup */
 	if (!FU_DEVICE_CLASS(fu_dell_dock_hub_parent_class)->setup(device, error))
 		return FALSE;
+
+	if (fu_device_has_private_flag(device, FU_DELL_DOCK_HUB_FLAG_HAS_BRIDGE))
+		return TRUE;
+
 	return fu_dell_dock_hid_get_hub_version(device, error);
 }
 
@@ -153,19 +140,19 @@ fu_dell_dock_hub_set_quirk_kv(FuDevice *device,
 	guint64 tmp = 0;
 
 	if (g_strcmp0(key, "DellDockUnlockTarget") == 0) {
-		if (!fu_strtoull(value, &tmp, 0, G_MAXUINT8, error))
+		if (!fu_strtoull(value, &tmp, 0, G_MAXUINT8, FU_INTEGER_BASE_AUTO, error))
 			return FALSE;
 		self->unlock_target = tmp;
 		return TRUE;
 	}
 	if (g_strcmp0(key, "DellDockBlobMajorOffset") == 0) {
-		if (!fu_strtoull(value, &tmp, 0, G_MAXUINT32, error))
+		if (!fu_strtoull(value, &tmp, 0, G_MAXUINT32, FU_INTEGER_BASE_AUTO, error))
 			return FALSE;
 		self->blob_major_offset = tmp;
 		return TRUE;
 	}
 	if (g_strcmp0(key, "DellDockBlobMinorOffset") == 0) {
-		if (!fu_strtoull(value, &tmp, 0, G_MAXUINT32, error))
+		if (!fu_strtoull(value, &tmp, 0, G_MAXUINT32, FU_INTEGER_BASE_AUTO, error))
 			return FALSE;
 		self->blob_minor_offset = tmp;
 		return TRUE;

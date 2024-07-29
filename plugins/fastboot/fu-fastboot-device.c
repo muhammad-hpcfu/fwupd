@@ -38,14 +38,13 @@ static gboolean
 fu_fastboot_device_probe(FuDevice *device, GError **error)
 {
 	FuFastbootDevice *self = FU_FASTBOOT_DEVICE(device);
-	GUsbDevice *usb_device = fu_usb_device_get_dev(FU_USB_DEVICE(self));
-	g_autoptr(GUsbInterface) intf = NULL;
+	g_autoptr(FuUsbInterface) intf = NULL;
 
 	/* find the correct fastboot interface */
-	intf = g_usb_device_get_interface(usb_device, 0xff, 0x42, 0x03, error);
+	intf = fu_usb_device_get_interface(FU_USB_DEVICE(self), 0xff, 0x42, 0x03, error);
 	if (intf == NULL)
 		return FALSE;
-	fu_usb_device_add_interface(FU_USB_DEVICE(self), g_usb_interface_get_number(intf));
+	fu_usb_device_add_interface(FU_USB_DEVICE(self), fu_usb_interface_get_number(intf));
 	return TRUE;
 }
 
@@ -53,7 +52,6 @@ static gboolean
 fu_fastboot_device_write(FuDevice *device, const guint8 *buf, gsize buflen, GError **error)
 {
 	FuFastbootDevice *self = FU_FASTBOOT_DEVICE(device);
-	GUsbDevice *usb_device = fu_usb_device_get_dev(FU_USB_DEVICE(device));
 	gboolean ret;
 	gsize actual_len = 0;
 	g_autofree guint8 *buf2 = NULL;
@@ -63,14 +61,14 @@ fu_fastboot_device_write(FuDevice *device, const guint8 *buf, gsize buflen, GErr
 	buf2 = fu_memdup_safe(buf, buflen, error);
 	if (buf2 == NULL)
 		return FALSE;
-	ret = g_usb_device_bulk_transfer(usb_device,
-					 FASTBOOT_EP_OUT,
-					 buf2,
-					 buflen,
-					 &actual_len,
-					 FASTBOOT_TRANSACTION_TIMEOUT,
-					 NULL,
-					 error);
+	ret = fu_usb_device_bulk_transfer(FU_USB_DEVICE(self),
+					  FASTBOOT_EP_OUT,
+					  buf2,
+					  buflen,
+					  &actual_len,
+					  FASTBOOT_TRANSACTION_TIMEOUT,
+					  NULL,
+					  error);
 
 	/* give device some time to handle action */
 	fu_device_sleep(device, self->operation_delay);
@@ -118,7 +116,6 @@ fu_fastboot_device_read(FuDevice *device,
 			GError **error)
 {
 	FuFastbootDevice *self = FU_FASTBOOT_DEVICE(device);
-	GUsbDevice *usb_device = fu_usb_device_get_dev(FU_USB_DEVICE(device));
 	guint retries = 1;
 
 	/* these commands may return INFO or take some time to complete */
@@ -132,21 +129,19 @@ fu_fastboot_device_read(FuDevice *device,
 		g_autofree gchar *tmp = NULL;
 		g_autoptr(GError) error_local = NULL;
 
-		ret = g_usb_device_bulk_transfer(usb_device,
-						 FASTBOOT_EP_IN,
-						 buf,
-						 sizeof(buf),
-						 &actual_len,
-						 FASTBOOT_TRANSACTION_TIMEOUT,
-						 NULL,
-						 &error_local);
+		ret = fu_usb_device_bulk_transfer(FU_USB_DEVICE(self),
+						  FASTBOOT_EP_IN,
+						  buf,
+						  sizeof(buf),
+						  &actual_len,
+						  FASTBOOT_TRANSACTION_TIMEOUT,
+						  NULL,
+						  &error_local);
 		/* give device some time to handle action */
 		fu_device_sleep(device, self->operation_delay);
 
 		if (!ret) {
-			if (g_error_matches(error_local,
-					    G_USB_DEVICE_ERROR,
-					    G_USB_DEVICE_ERROR_TIMED_OUT)) {
+			if (g_error_matches(error_local, FWUPD_ERROR, FWUPD_ERROR_TIMED_OUT)) {
 				g_debug("ignoring %s", error_local->message);
 				continue;
 			}
@@ -656,13 +651,13 @@ fu_fastboot_device_set_quirk_kv(FuDevice *device,
 
 	/* load from quirks */
 	if (g_strcmp0(key, "FastbootBlockSize") == 0) {
-		if (!fu_strtoull(value, &tmp, 0x40, 0x100000, error))
+		if (!fu_strtoull(value, &tmp, 0x40, 0x100000, FU_INTEGER_BASE_AUTO, error))
 			return FALSE;
 		self->blocksz = tmp;
 		return TRUE;
 	}
 	if (g_strcmp0(key, "FastbootOperationDelay") == 0) {
-		if (!fu_strtoull(value, &tmp, 0, G_MAXSIZE, error))
+		if (!fu_strtoull(value, &tmp, 0, G_MAXSIZE, FU_INTEGER_BASE_AUTO, error))
 			return FALSE;
 		self->operation_delay = tmp;
 		return TRUE;

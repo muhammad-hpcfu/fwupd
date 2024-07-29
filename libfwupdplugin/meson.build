@@ -16,12 +16,14 @@ fwupdplugin_structs = [
   'fu-ifd.rs', # fuzzing
   'fu-ifwi.rs', # fuzzing
   'fu-intel-thunderbolt.rs', # fuzzing
+  'fu-io-channel.rs', # fuzzing
   'fu-oprom.rs', # fuzzing
   'fu-pefile.rs', # fuzzing
   'fu-progress.rs', # fuzzing
   'fu-sbatlevel-section.rs', # fuzzing
   'fu-smbios.rs', # fuzzing
   'fu-usb-device-ds20.rs', # fuzzing
+  'fu-usb.rs', # fuzzing
   'fu-uswid.rs', # fuzzing
 ]
 
@@ -46,7 +48,7 @@ fwupdplugin_src = [
   'fu-acpi-table.c', # fuzzing
   'fu-archive.c',
   'fu-archive-firmware.c',
-  'fu-backend.c',
+  'fu-backend.c', # fuzzing
   'fu-bios-setting.c', # fuzzing
   'fu-bios-settings.c', # fuzzing
   'fu-bluez-device.c',
@@ -70,6 +72,7 @@ fwupdplugin_src = [
   'fu-csv-entry.c', # fuzzing
   'fu-csv-firmware.c', # fuzzing
   'fu-device.c', # fuzzing
+  'fu-device-event.c', # fuzzing
   'fu-device-locker.c', # fuzzing
   'fu-device-progress.c',
   'fu-dfu-firmware.c', # fuzzing
@@ -144,10 +147,13 @@ fwupdplugin_src = [
   'fu-string.c', # fuzzing
   'fu-sum.c', # fuzzing
   'fu-udev-device.c',
+  'fu-usb-bos-descriptor.c',
   'fu-usb-device.c',
-  'fu-usb-device-ds20.c', # fuzzing
-  'fu-usb-device-fw-ds20.c', # fuzzing
-  'fu-usb-device-ms-ds20.c', # fuzzing
+  'fu-usb-device-ds20.c',
+  'fu-usb-device-fw-ds20.c',
+  'fu-usb-device-ms-ds20.c',
+  'fu-usb-endpoint.c',
+  'fu-usb-interface.c',
   'fu-uswid-firmware.c', # fuzzing
   'fu-version-common.c', # fuzzing
   'fu-volume.c', # fuzzing
@@ -172,7 +178,6 @@ fwupdplugin_headers = [
   'fu-archive-firmware.h',
   'fu-archive.h',
   'fu-backend.h',
-  'fu-backend-private.h',
   'fu-bios-settings.h',
   'fu-bios-settings-private.h',
   'fu-bluez-device.h',
@@ -198,6 +203,7 @@ fwupdplugin_headers = [
   'fu-csv-entry.h',
   'fu-csv-firmware.h',
   'fu-device.h',
+  'fu-device-event.h',
   'fu-device-locker.h',
   'fu-device-metadata.h',
   'fu-device-private.h',
@@ -271,7 +277,13 @@ fwupdplugin_headers = [
   'fu-udev-device-private.h',
   'fu-usb-device-ds20.h',
   'fu-usb-device-fw-ds20.h',
+  'fu-usb-bos-descriptor.h',
+  'fu-usb-bos-descriptor-private.h',
   'fu-usb-device.h',
+  'fu-usb-endpoint.h',
+  'fu-usb-endpoint-private.h',
+  'fu-usb-interface.h',
+  'fu-usb-interface-private.h',
   'fu-usb-device-ms-ds20.h',
   'fu-usb-device-private.h',
   'fu-uswid-firmware.h',
@@ -282,7 +294,7 @@ fwupdplugin_headers = [
 introspection_deps = [
   libxmlb,
   giounix,
-  gusb,
+  libusb,
   gudev,
 ]
 
@@ -293,7 +305,7 @@ pkgg_requires = [ 'gio-2.0',
                   'json-glib-1.0',
                   'libarchive',
                   'xmlb',
-                  'gusb'
+                  'libusb',
 ]
 
 library_deps = [
@@ -304,7 +316,9 @@ library_deps = [
   valgrind,
   lzma,
   libarchive,
+  libusb,
   cbor,
+  sqlite,
   platform_deps,
 ]
 
@@ -340,14 +354,6 @@ if introspection.allowed()
   gir_dep = declare_dependency(sources: fwupd_gir)
   girtargets = []
   extra_args = []
-  if gusb.found()
-    if gusb.type_name() == 'internal'
-      girtargets += subproject('gusb').get_variable('libgusb_girtarget')[0]
-    else
-      girtargets += 'GUsb-1.0'
-    endif
-    extra_args += '-DHAVE_GUSB'
-  endif
   if libxmlb.type_name() == 'internal'
     girtargets += subproject('libxmlb').get_variable('gir')[0]
   else
@@ -410,12 +416,12 @@ if get_option('tests')
 
   env = environment()
   env.set('G_TEST_SRCDIR', meson.current_source_dir())
-  env.set('G_TEST_BUILDDIR', meson.current_build_dir())
   e = executable(
     'fwupdplugin-self-test',
     installed_firmware_zip,
     rustgen.process('fu-self-test.rs'),
     sources: [
+      'fu-test-device.c',
       'fu-self-test.c'
     ],
     include_directories: [

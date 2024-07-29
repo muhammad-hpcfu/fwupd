@@ -400,7 +400,7 @@ fu_ata_device_parse_id(FuAtaDevice *self, const guint8 *buf, gsize sz, GError **
 	self->oui = ((guint32)(id[108] & 0x0fff)) << 12 | ((guint32)(id[109] & 0xfff0)) >> 4;
 	if (self->oui > 0x0) {
 		g_autofree gchar *tmp = NULL;
-		tmp = g_strdup_printf("OUI\\%06x", self->oui);
+		tmp = g_strdup_printf("OUI\\VID_%06x", self->oui);
 		fu_device_add_instance_id_full(device, tmp, FU_DEVICE_INSTANCE_FLAG_QUIRKS);
 		has_oui_quirk = fu_device_get_vendor(FU_DEVICE(self)) != NULL;
 	}
@@ -462,23 +462,14 @@ static gboolean
 fu_ata_device_probe(FuDevice *device, GError **error)
 {
 	FuAtaDevice *self = FU_ATA_DEVICE(device);
-	GUdevDevice *udev_device = fu_udev_device_get_dev(FU_UDEV_DEVICE(device));
 
 	/* check is valid */
-	if (g_strcmp0(g_udev_device_get_devtype(udev_device), "disk") != 0) {
+	if (g_strcmp0(fu_udev_device_get_devtype(FU_UDEV_DEVICE(device)), "disk") != 0) {
 		g_set_error(error,
 			    FWUPD_ERROR,
 			    FWUPD_ERROR_NOT_SUPPORTED,
 			    "is not correct devtype=%s, expected disk",
-			    g_udev_device_get_devtype(udev_device));
-		return FALSE;
-	}
-	if (!g_udev_device_get_property_as_boolean(udev_device, "ID_ATA_SATA") ||
-	    !g_udev_device_get_property_as_boolean(udev_device, "ID_ATA_DOWNLOAD_MICROCODE")) {
-		g_set_error_literal(error,
-				    FWUPD_ERROR,
-				    FWUPD_ERROR_NOT_SUPPORTED,
-				    "has no ID_ATA_DOWNLOAD_MICROCODE");
+			    fu_udev_device_get_devtype(FU_UDEV_DEVICE(device)));
 		return FALSE;
 	}
 
@@ -487,8 +478,8 @@ fu_ata_device_probe(FuDevice *device, GError **error)
 		return FALSE;
 
 	/* look at the PCI and USB depth to work out if in an external enclosure */
-	self->pci_depth = fu_udev_device_get_slot_depth(FU_UDEV_DEVICE(device), "pci");
-	self->usb_depth = fu_udev_device_get_slot_depth(FU_UDEV_DEVICE(device), "usb");
+	self->pci_depth = fu_udev_device_get_subsystem_depth(FU_UDEV_DEVICE(device), "pci");
+	self->usb_depth = fu_udev_device_get_subsystem_depth(FU_UDEV_DEVICE(device), "usb");
 	if (self->pci_depth <= 2 && self->usb_depth <= 2) {
 		fu_device_add_flag(device, FWUPD_DEVICE_FLAG_INTERNAL);
 		fu_device_add_flag(device, FWUPD_DEVICE_FLAG_USABLE_DURING_UPDATE);
@@ -562,8 +553,10 @@ fu_ata_device_command(FuAtaDevice *self,
 	if (!fu_udev_device_ioctl(FU_UDEV_DEVICE(self),
 				  SG_IO,
 				  (guint8 *)&io_hdr,
+				  sizeof(io_hdr),
 				  NULL,
 				  FU_ATA_DEVICE_IOCTL_TIMEOUT,
+				  FU_UDEV_DEVICE_IOCTL_FLAG_NONE,
 				  error))
 		return FALSE;
 	g_debug("ATA_%u status=0x%x, host_status=0x%x, driver_status=0x%x",
@@ -845,7 +838,7 @@ fu_ata_device_set_quirk_kv(FuDevice *device, const gchar *key, const gchar *valu
 	guint64 tmp = 0;
 
 	if (g_strcmp0(key, "AtaTransferMode") == 0) {
-		if (!fu_strtoull(value, &tmp, 0, G_MAXUINT8, error))
+		if (!fu_strtoull(value, &tmp, 0, G_MAXUINT8, FU_INTEGER_BASE_AUTO, error))
 			return FALSE;
 		if (tmp != ATA_SUBCMD_MICROCODE_DOWNLOAD_CHUNKS_ACTIVATE &&
 		    tmp != ATA_SUBCMD_MICROCODE_DOWNLOAD_CHUNKS &&
@@ -861,7 +854,7 @@ fu_ata_device_set_quirk_kv(FuDevice *device, const gchar *key, const gchar *valu
 		return TRUE;
 	}
 	if (g_strcmp0(key, "AtaTransferBlocks") == 0) {
-		if (!fu_strtoull(value, &tmp, 0, G_MAXUINT16, error))
+		if (!fu_strtoull(value, &tmp, 0, G_MAXUINT16, FU_INTEGER_BASE_AUTO, error))
 			return FALSE;
 		self->transfer_blocks = (guint16)tmp;
 		return TRUE;
@@ -900,7 +893,7 @@ fu_ata_device_init(FuAtaDevice *self)
 	fu_device_add_icon(FU_DEVICE(self), "drive-harddisk");
 	fu_device_add_protocol(FU_DEVICE(self), "org.t13.ata");
 	fu_device_set_version_format(FU_DEVICE(self), FWUPD_VERSION_FORMAT_PLAIN);
-	fu_udev_device_add_flag(FU_UDEV_DEVICE(self), FU_UDEV_DEVICE_FLAG_OPEN_READ);
+	fu_udev_device_add_open_flag(FU_UDEV_DEVICE(self), FU_IO_CHANNEL_OPEN_FLAG_READ);
 }
 
 static void

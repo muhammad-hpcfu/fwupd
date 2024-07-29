@@ -21,21 +21,26 @@
  * @value: (out) (nullable): parsed value
  * @min: minimum acceptable value, typically 0
  * @max: maximum acceptable value, typically G_MAXUINT64
+ * @base: default log base, usually %FU_INTEGER_BASE_AUTO
  * @error: (nullable): optional return location for an error
  *
- * Converts a string value to an integer. Values are assumed base 10, unless
- * prefixed with "0x" where they are parsed as base 16.
+ * Converts a string value to an integer. If the @value is prefixed with `0x` then the base is
+ * set to 16 automatically.
  *
  * Returns: %TRUE if the value was parsed correctly, or %FALSE for error
  *
- * Since: 1.8.2
+ * Since: 2.0.0
  **/
 gboolean
-fu_strtoull(const gchar *str, guint64 *value, guint64 min, guint64 max, GError **error)
+fu_strtoull(const gchar *str,
+	    guint64 *value,
+	    guint64 min,
+	    guint64 max,
+	    FuIntegerBase base,
+	    GError **error)
 {
 	gchar *endptr = NULL;
 	guint64 value_tmp;
-	guint base = 10;
 
 	/* sanity check */
 	if (str == NULL) {
@@ -47,13 +52,25 @@ fu_strtoull(const gchar *str, guint64 *value, guint64 min, guint64 max, GError *
 	}
 
 	/* detect hex */
-	if (g_str_has_prefix(str, "0x")) {
+	if (base == FU_INTEGER_BASE_AUTO) {
+		if (g_str_has_prefix(str, "0x")) {
+			str += 2;
+			base = FU_INTEGER_BASE_16;
+		} else {
+			base = FU_INTEGER_BASE_10;
+		}
+	} else if (base == FU_INTEGER_BASE_16 && g_str_has_prefix(str, "0x")) {
 		str += 2;
-		base = 16;
+	} else if (base == FU_INTEGER_BASE_10 && g_str_has_prefix(str, "0x")) {
+		g_set_error_literal(error,
+				    FWUPD_ERROR,
+				    FWUPD_ERROR_INVALID_DATA,
+				    "cannot parse 0x-prefixed base-10 string");
+		return FALSE;
 	}
 
 	/* convert */
-	value_tmp = g_ascii_strtoull(str, &endptr, base);
+	value_tmp = g_ascii_strtoull(str, &endptr, base); /* nocheck */
 	if ((gsize)(endptr - str) != strlen(str) && *endptr != '\n') {
 		g_set_error(error, FWUPD_ERROR, FWUPD_ERROR_INVALID_DATA, "cannot parse %s", str);
 		return FALSE;
@@ -101,6 +118,7 @@ fu_strtoull(const gchar *str, guint64 *value, guint64 min, guint64 max, GError *
  * @value: (out) (nullable): parsed value
  * @min: minimum acceptable value, typically 0
  * @max: maximum acceptable value, typically G_MAXINT64
+ * @base: default log base, usually %FU_INTEGER_BASE_AUTO
  * @error: (nullable): optional return location for an error
  *
  * Converts a string value to an integer. Values are assumed base 10, unless
@@ -108,14 +126,18 @@ fu_strtoull(const gchar *str, guint64 *value, guint64 min, guint64 max, GError *
  *
  * Returns: %TRUE if the value was parsed correctly, or %FALSE for error
  *
- * Since: 1.9.7
+ * Since: 2.0.0
  **/
 gboolean
-fu_strtoll(const gchar *str, gint64 *value, gint64 min, gint64 max, GError **error)
+fu_strtoll(const gchar *str,
+	   gint64 *value,
+	   gint64 min,
+	   gint64 max,
+	   FuIntegerBase base,
+	   GError **error)
 {
 	gchar *endptr = NULL;
 	gint64 value_tmp;
-	guint base = 10;
 
 	/* sanity check */
 	if (str == NULL) {
@@ -127,13 +149,25 @@ fu_strtoll(const gchar *str, gint64 *value, gint64 min, gint64 max, GError **err
 	}
 
 	/* detect hex */
-	if (g_str_has_prefix(str, "0x")) {
+	if (base == FU_INTEGER_BASE_AUTO) {
+		if (g_str_has_prefix(str, "0x")) {
+			str += 2;
+			base = FU_INTEGER_BASE_16;
+		} else {
+			base = FU_INTEGER_BASE_10;
+		}
+	} else if (base == FU_INTEGER_BASE_16 && g_str_has_prefix(str, "0x")) {
 		str += 2;
-		base = 16;
+	} else if (base == FU_INTEGER_BASE_10 && g_str_has_prefix(str, "0x")) {
+		g_set_error_literal(error,
+				    FWUPD_ERROR,
+				    FWUPD_ERROR_INVALID_DATA,
+				    "cannot parse 0x-prefixed base-10 string");
+		return FALSE;
 	}
 
 	/* convert */
-	value_tmp = g_ascii_strtoll(str, &endptr, base);
+	value_tmp = g_ascii_strtoll(str, &endptr, base); /* nocheck */
 	if ((gsize)(endptr - str) != strlen(str) && *endptr != '\n') {
 		g_set_error(error, FWUPD_ERROR, FWUPD_ERROR_INVALID_DATA, "cannot parse %s", str);
 		return FALSE;
@@ -351,16 +385,15 @@ typedef struct {
 } FuStrsplitHelper;
 
 static gboolean
-fu_strsplit_buffer_drain(GByteArray *buf,
-			 FuStrsplitHelper *helper,
-			 gboolean is_last,
-			 GError **error)
+fu_strsplit_buffer_drain(GByteArray *buf, FuStrsplitHelper *helper, GError **error)
 {
-	while (buf->len > 0) {
+	gsize buf_offset = 0;
+	while (buf_offset < buf->len) {
 		gsize offset;
 		g_autoptr(GString) token = g_string_new(NULL);
 
-		for (offset = 0; offset < buf->len; offset++) {
+		/* find first match in buffer, starting at the buffer offset */
+		for (offset = buf_offset; offset < buf->len; offset++) {
 			if (buf->data[offset] == 0x0) {
 				helper->detected_nul = TRUE;
 				break;
@@ -371,27 +404,27 @@ fu_strsplit_buffer_drain(GByteArray *buf,
 				break;
 		}
 
-		/* no token found */
-		if (offset == buf->len && !is_last)
+		/* no token found, keep going */
+		if (offset == buf->len)
 			break;
 
 		/* sanity check is valid UTF-8 */
-		g_string_append_len(token, (const gchar *)buf->data, offset);
+		g_string_append_len(token,
+				    (const gchar *)buf->data + buf_offset,
+				    offset - buf_offset);
 		if (!g_utf8_validate_len(token->str, token->len, NULL)) {
-			g_set_error_literal(error,
-					    FWUPD_ERROR,
-					    FWUPD_ERROR_INVALID_FILE,
-					    "text must be UTF-8");
-			return FALSE;
+			g_debug("ignoring invalid UTF-8, got: %s", token->str);
+		} else {
+			if (!helper->callback(token, helper->token_idx++, helper->user_data, error))
+				return FALSE;
 		}
-		if (!helper->callback(token, helper->token_idx++, helper->user_data, error))
-			return FALSE;
 		if (helper->detected_nul) {
-			g_byte_array_set_size(buf, 0);
+			buf_offset = buf->len;
 			break;
 		}
-		g_byte_array_remove_range(buf, 0, MIN(offset + helper->delimiter_sz, buf->len));
+		buf_offset = offset + helper->delimiter_sz;
 	}
+	g_byte_array_remove_range(buf, 0, MIN(buf_offset, buf->len));
 	return TRUE;
 }
 
@@ -457,12 +490,12 @@ fu_strsplit_stream(GInputStream *stream,
 		if (chk == NULL)
 			return FALSE;
 		g_byte_array_append(buf, fu_chunk_get_data(chk), fu_chunk_get_data_sz(chk));
-		if (!fu_strsplit_buffer_drain(buf, &helper, FALSE, error))
+		if (!fu_strsplit_buffer_drain(buf, &helper, error))
 			return FALSE;
 		if (helper.detected_nul)
 			break;
 	}
-	return fu_strsplit_buffer_drain(buf, &helper, TRUE, error);
+	return TRUE;
 }
 
 /**

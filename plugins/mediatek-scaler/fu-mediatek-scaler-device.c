@@ -71,8 +71,10 @@ fu_mediatek_scaler_ensure_device_address(FuMediatekScalerDevice *self,
 	if (!fu_udev_device_ioctl(self->i2c_dev,
 				  I2C_SLAVE,
 				  (guint8 *)(guintptr)address,
+				  sizeof(guintptr),
 				  NULL,
 				  FU_MEDIATEK_SCALER_DEVICE_IOCTL_TIMEOUT,
+				  FU_UDEV_DEVICE_IOCTL_FLAG_NONE,
 				  error)) {
 		g_prefix_error(error,
 			       "failed to set address '0x%02x' on %s: ",
@@ -493,8 +495,7 @@ fu_mediatek_scaler_device_probe(FuDevice *device, GError **error)
 		return FALSE;
 
 	/* set vid and pid from PCI bus */
-	udev_parent =
-	    fu_udev_device_get_parent_with_subsystem(FU_UDEV_DEVICE(device), "pci", error);
+	udev_parent = FU_UDEV_DEVICE(fu_device_get_backend_parent_with_kind(device, "pci", error));
 	if (udev_parent == NULL)
 		return FALSE;
 	if (!fu_device_probe(FU_DEVICE(udev_parent), error))

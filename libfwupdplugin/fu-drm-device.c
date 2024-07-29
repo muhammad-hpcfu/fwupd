@@ -8,6 +8,7 @@
 
 #include "config.h"
 
+#include "fu-bytes.h"
 #include "fu-drm-device.h"
 #include "fu-string.h"
 
@@ -128,11 +129,13 @@ fu_drm_device_get_edid(FuDrmDevice *self)
 static gboolean
 fu_drm_device_probe(FuDevice *device, GError **error)
 {
-	g_autoptr(FuUdevDevice) parent = NULL;
+	g_autoptr(FuDevice) parent = NULL;
 	FuDrmDevice *self = FU_DRM_DEVICE(device);
 	FuDrmDevicePrivate *priv = GET_PRIVATE(self);
 	const gchar *sysfs_path = fu_udev_device_get_sysfs_path(FU_UDEV_DEVICE(device));
-	const gchar *tmp;
+	g_autofree gchar *attr_enabled = NULL;
+	g_autofree gchar *attr_status = NULL;
+	g_autofree gchar *attr_connector_id = NULL;
 	g_autofree gchar *physical_id = g_path_get_basename(sysfs_path);
 
 	/* FuUdevDevice->probe */
@@ -140,13 +143,22 @@ fu_drm_device_probe(FuDevice *device, GError **error)
 		return FALSE;
 
 	/* basic properties */
-	tmp = fu_udev_device_get_sysfs_attr(FU_UDEV_DEVICE(self), "enabled", NULL);
-	priv->enabled = g_strcmp0(tmp, "enabled") == 0;
-	tmp = fu_udev_device_get_sysfs_attr(FU_UDEV_DEVICE(self), "status", NULL);
-	priv->display_state = fu_display_state_from_string(tmp);
-	tmp = fu_udev_device_get_sysfs_attr(FU_UDEV_DEVICE(self), "connector_id", NULL);
-	if (tmp != NULL && tmp[0] != '\0')
-		priv->connector_id = g_strdup(tmp);
+	attr_enabled = fu_udev_device_read_sysfs(FU_UDEV_DEVICE(self),
+						 "enabled",
+						 FU_UDEV_DEVICE_ATTR_READ_TIMEOUT_DEFAULT,
+						 NULL);
+	priv->enabled = g_strcmp0(attr_enabled, "enabled") == 0;
+	attr_status = fu_udev_device_read_sysfs(FU_UDEV_DEVICE(self),
+						"status",
+						FU_UDEV_DEVICE_ATTR_READ_TIMEOUT_DEFAULT,
+						NULL);
+	priv->display_state = fu_display_state_from_string(attr_status);
+	attr_connector_id = fu_udev_device_read_sysfs(FU_UDEV_DEVICE(self),
+						      "connector_id",
+						      FU_UDEV_DEVICE_ATTR_READ_TIMEOUT_DEFAULT,
+						      NULL);
+	if (attr_connector_id != NULL && attr_connector_id[0] != '\0')
+		priv->connector_id = g_strdup(attr_connector_id);
 
 	/* this is a heuristic */
 	if (physical_id != NULL) {
@@ -159,21 +171,23 @@ fu_drm_device_probe(FuDevice *device, GError **error)
 	}
 
 	/* set the parent */
-	parent = fu_udev_device_get_parent_with_subsystem(FU_UDEV_DEVICE(self), "pci", NULL);
-	if (parent != NULL)
-		fu_device_add_parent_backend_id(device, fu_udev_device_get_sysfs_path(parent));
+	parent = fu_device_get_backend_parent_with_kind(FU_DEVICE(self), "pci", NULL);
+	if (parent != NULL) {
+		fu_device_add_parent_backend_id(
+		    device,
+		    fu_udev_device_get_sysfs_path(FU_UDEV_DEVICE(parent)));
+	}
 
 	/* read EDID and parse it */
 	if (priv->display_state == FU_DISPLAY_STATE_CONNECTED) {
 		g_autofree gchar *edid_path = g_build_filename(sysfs_path, "edid", NULL);
 		g_autoptr(FuEdid) edid = fu_edid_new();
-		g_autoptr(GFile) file = NULL;
+		g_autoptr(GBytes) blob = NULL;
 
-		file = g_file_new_for_path(edid_path);
-		if (!fu_firmware_parse_file(FU_FIRMWARE(edid),
-					    file,
-					    FWUPD_INSTALL_FLAG_NONE,
-					    error))
+		blob = fu_bytes_get_contents(edid_path, error);
+		if (blob == NULL)
+			return FALSE;
+		if (!fu_firmware_parse(FU_FIRMWARE(edid), blob, FWUPD_INSTALL_FLAG_NONE, error))
 			return FALSE;
 		g_set_object(&priv->edid, edid);
 

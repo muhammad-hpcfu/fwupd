@@ -86,8 +86,10 @@ fu_goodixtp_hid_device_get_report(FuGoodixtpHidDevice *self,
 	if (!fu_udev_device_ioctl(FU_UDEV_DEVICE(self),
 				  HIDIOCGFEATURE(PACKAGE_LEN),
 				  rcv_buf,
+				  sizeof(rcv_buf),
 				  NULL,
 				  GOODIX_DEVICE_IOCTL_TIMEOUT,
+				  FU_UDEV_DEVICE_IOCTL_FLAG_NONE,
 				  error)) {
 		g_prefix_error(error, "failed get report: ");
 		return FALSE;
@@ -123,8 +125,10 @@ fu_goodixtp_hid_device_set_report(FuGoodixtpHidDevice *self,
 	if (!fu_udev_device_ioctl(FU_UDEV_DEVICE(self),
 				  HIDIOCSFEATURE(bufsz),
 				  buf,
+				  bufsz,
 				  NULL,
 				  GOODIX_DEVICE_IOCTL_TIMEOUT,
+				  FU_UDEV_DEVICE_IOCTL_FLAG_NONE,
 				  error)) {
 		g_prefix_error(error, "failed set report: ");
 		return FALSE;
@@ -186,9 +190,9 @@ fu_goodixtp_hid_device_init(FuGoodixtpHidDevice *self)
 	fu_device_set_vendor(FU_DEVICE(self), "Goodix inc.");
 	fu_device_set_version_format(FU_DEVICE(self), FWUPD_VERSION_FORMAT_HEX);
 	fu_device_set_priority(FU_DEVICE(self), 1); /* better than i2c */
-	fu_udev_device_add_flag(FU_UDEV_DEVICE(self), FU_UDEV_DEVICE_FLAG_OPEN_READ);
-	fu_udev_device_add_flag(FU_UDEV_DEVICE(self), FU_UDEV_DEVICE_FLAG_OPEN_WRITE);
-	fu_udev_device_add_flag(FU_UDEV_DEVICE(self), FU_UDEV_DEVICE_FLAG_OPEN_NONBLOCK);
+	fu_udev_device_add_open_flag(FU_UDEV_DEVICE(self), FU_IO_CHANNEL_OPEN_FLAG_READ);
+	fu_udev_device_add_open_flag(FU_UDEV_DEVICE(self), FU_IO_CHANNEL_OPEN_FLAG_WRITE);
+	fu_udev_device_add_open_flag(FU_UDEV_DEVICE(self), FU_IO_CHANNEL_OPEN_FLAG_NONBLOCK);
 }
 
 static void

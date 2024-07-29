@@ -38,7 +38,6 @@
 #include "fwupd-resources.h"
 #include "fwupd-security-attr-private.h"
 
-#include "fu-backend-private.h"
 #include "fu-bios-settings-private.h"
 #include "fu-config-private.h"
 #include "fu-context-private.h"
@@ -62,6 +61,7 @@
 #include "fu-security-attr-common.h"
 #include "fu-security-attrs-private.h"
 #include "fu-udev-device-private.h"
+#include "fu-usb-backend.h"
 #include "fu-usb-device-fw-ds20.h"
 #include "fu-usb-device-ms-ds20.h"
 #include "fu-usb-device-private.h"
@@ -71,9 +71,6 @@
 #endif
 #ifdef HAVE_GUDEV
 #include "fu-udev-backend.h"
-#endif
-#ifdef HAVE_GUSB
-#include "fu-usb-backend.h"
 #endif
 #ifdef HAVE_BLUEZ
 #include "fu-bluez-backend.h"
@@ -975,6 +972,21 @@ fu_engine_remove_device_flag(FuEngine *self,
 			return FALSE;
 		fu_device_remove_flag(device, flag);
 		return fu_history_modify_device(self->history, device, error);
+	}
+	if (flag == FWUPD_DEVICE_FLAG_EMULATED) {
+		device = fu_device_list_get_by_id(self->device_list, device_id, error);
+		if (device == NULL)
+			return FALSE;
+		if (!fu_device_has_flag(device, FWUPD_DEVICE_FLAG_EMULATED)) {
+			g_set_error(error,
+				    FWUPD_ERROR,
+				    FWUPD_ERROR_NOT_SUPPORTED,
+				    "device %s is not emulated",
+				    fu_device_get_id(device));
+			return FALSE;
+		}
+		fu_device_list_remove(self->device_list, device);
+		return TRUE;
 	}
 	if (flag == FWUPD_DEVICE_FLAG_EMULATION_TAG) {
 		device = fu_device_list_get_by_id(self->device_list, device_id, error);
@@ -2217,39 +2229,6 @@ fu_engine_is_running_offline(FuEngine *self)
 }
 
 #ifdef HAVE_FWUPDOFFLINE
-#ifdef HAVE_GIO_UNIX
-static gchar *
-fu_realpath(const gchar *filename, GError **error)
-{
-	char full_tmp[PATH_MAX];
-
-	g_return_val_if_fail(filename != NULL, NULL);
-	g_return_val_if_fail(error == NULL || *error == NULL, NULL);
-
-#ifdef HAVE_REALPATH
-	if (realpath(filename, full_tmp) == NULL) {
-#else
-	if (_fullpath(full_tmp, filename, sizeof(full_tmp)) == NULL) {
-#endif
-		g_set_error(error,
-			    FWUPD_ERROR,
-			    FWUPD_ERROR_INVALID_DATA,
-			    "cannot resolve path: %s",
-			    g_strerror(errno));
-		return NULL;
-	}
-	if (!g_file_test(full_tmp, G_FILE_TEST_EXISTS)) {
-		g_set_error(error,
-			    FWUPD_ERROR,
-			    FWUPD_ERROR_INVALID_DATA,
-			    "cannot find path: %s",
-			    full_tmp);
-		return NULL;
-	}
-	return g_strdup(full_tmp);
-}
-#endif
-
 static gboolean
 fu_engine_offline_setup(GError **error)
 {
@@ -2262,7 +2241,7 @@ fu_engine_offline_setup(GError **error)
 	g_return_val_if_fail(error == NULL || *error == NULL, FALSE);
 
 	/* does already exist */
-	filename = fu_realpath(trigger, NULL);
+	filename = fu_path_make_absolute(trigger, NULL);
 	if (g_strcmp0(filename, symlink_target) == 0) {
 		g_info("%s already points to %s, skipping creation", trigger, symlink_target);
 		return TRUE;
@@ -2670,16 +2649,12 @@ fu_engine_emulation_load_json(FuEngine *self, const gchar *json, GError **error)
 	/* parse */
 	if (!json_parser_load_from_data(parser, json, -1, error))
 		return FALSE;
-	root = json_parser_get_root(parser);
 
 	/* load into all backends */
+	root = json_parser_get_root(parser);
 	for (guint i = 0; i < self->backends->len; i++) {
 		FuBackend *backend = g_ptr_array_index(self->backends, i);
-		if (!fu_backend_load(backend,
-				     json_node_get_object(root),
-				     FU_USB_DEVICE_EMULATION_TAG,
-				     FU_BACKEND_LOAD_FLAG_NONE,
-				     error))
+		if (!fwupd_codec_from_json(FWUPD_CODEC(backend), root, error))
 			return FALSE;
 	}
 
@@ -2831,12 +2806,9 @@ fu_engine_backends_save_phase(FuEngine *self, GError **error)
 	/* all devices in all backends */
 	for (guint i = 0; i < self->backends->len; i++) {
 		FuBackend *backend = g_ptr_array_index(self->backends, i);
-		if (!fu_backend_save(backend,
-				     json_builder,
-				     FU_USB_DEVICE_EMULATION_TAG,
-				     FU_BACKEND_SAVE_FLAG_NONE,
-				     error))
-			return FALSE;
+		json_builder_begin_object(json_builder);
+		fwupd_codec_to_json(FWUPD_CODEC(backend), json_builder, FWUPD_CODEC_FLAG_NONE);
+		json_builder_end_object(json_builder);
 	}
 	json_root = json_builder_get_root(json_builder);
 	json_generator = json_generator_new();
@@ -3354,6 +3326,7 @@ fu_engine_write_firmware(FuEngine *self,
 					     progress,
 					     flags,
 					     &error_write)) {
+		g_autofree gchar *str_write = NULL;
 		g_autoptr(GError) error_attach = NULL;
 		g_autoptr(GError) error_cleanup = NULL;
 
@@ -3366,19 +3339,28 @@ fu_engine_write_firmware(FuEngine *self,
 			fu_device_set_update_state(device, FWUPD_UPDATE_STATE_FAILED);
 		}
 
+		/* this is really helpful for debugging, as we want to dump the device *before*
+		 * we run cleanup */
+		str_write = fu_device_to_string(device);
+		g_debug("failed write-firmware '%s': %s", error_write->message, str_write);
+
 		/* attach back into runtime then cleanup */
-		fu_engine_set_install_phase(self, FU_ENGINE_INSTALL_PHASE_ATTACH);
-		fu_progress_reset(progress);
-		if (!fu_plugin_runner_attach(plugin, device, progress, &error_attach)) {
-			g_warning("failed to attach device after failed update: %s",
-				  error_attach->message);
+		if (!fu_device_has_flag(device, FWUPD_DEVICE_FLAG_EMULATED)) {
+			fu_engine_set_install_phase(self, FU_ENGINE_INSTALL_PHASE_ATTACH);
+			fu_progress_reset(progress);
+			if (!fu_plugin_runner_attach(plugin, device, progress, &error_attach)) {
+				g_warning("failed to attach device after failed update: %s",
+					  error_attach->message);
+			}
+			fu_engine_set_install_phase(self, FU_ENGINE_INSTALL_PHASE_CLEANUP);
+			fu_progress_reset(progress);
+			if (!fu_engine_cleanup(self, device_id, progress, flags, &error_cleanup)) {
+				g_warning("failed to update-cleanup after failed update: %s",
+					  error_cleanup->message);
+			}
 		}
-		fu_engine_set_install_phase(self, FU_ENGINE_INSTALL_PHASE_CLEANUP);
-		fu_progress_reset(progress);
-		if (!fu_engine_cleanup(self, device_id, progress, flags, &error_cleanup)) {
-			g_warning("failed to update-cleanup after failed update: %s",
-				  error_cleanup->message);
-		}
+
+		/* return error to client */
 		g_propagate_error(error, g_steal_pointer(&error_write));
 		return FALSE;
 	}
@@ -3485,7 +3467,7 @@ fu_engine_install_blob(FuEngine *self,
 	}
 
 	/* mark this as modified even if we actually fail to do the update */
-	fu_device_set_modified(device, (guint64)g_get_real_time() / G_USEC_PER_SEC);
+	fu_device_set_modified_usec(device, g_get_real_time());
 
 	/* signal to all the plugins the update is about to happen */
 	device_id = g_strdup(fu_device_get_id(device));
@@ -3544,8 +3526,10 @@ fu_engine_install_blob(FuEngine *self,
 				      device_id,
 				      fu_progress_get_child(progress_local),
 				      feature_flags,
-				      error))
+				      error)) {
+			g_prefix_error(error, "failed to detach: ");
 			return FALSE;
+		}
 		fu_progress_step_done(progress_local);
 
 		/* install */
@@ -3555,8 +3539,10 @@ fu_engine_install_blob(FuEngine *self,
 					      stream_fw,
 					      fu_progress_get_child(progress_local),
 					      flags,
-					      error))
+					      error)) {
+			g_prefix_error(error, "failed to write-firmware: ");
 			return FALSE;
+		}
 		fu_progress_step_done(progress_local);
 
 		/* attach into runtime mode */
@@ -3564,14 +3550,18 @@ fu_engine_install_blob(FuEngine *self,
 		if (!fu_engine_attach(self,
 				      device_id,
 				      fu_progress_get_child(progress_local),
-				      error))
+				      error)) {
+			g_prefix_error(error, "failed to attach: ");
 			return FALSE;
+		}
 		fu_progress_step_done(progress_local);
 
 		/* get the new version number */
 		fu_engine_set_install_phase(self, FU_ENGINE_INSTALL_PHASE_RELOAD);
-		if (!fu_engine_reload(self, device_id, error))
+		if (!fu_engine_reload(self, device_id, error)) {
+			g_prefix_error(error, "failed to reload: ");
 			return FALSE;
+		}
 		fu_progress_step_done(progress_local);
 
 		/* the device and plugin both may have changed */
@@ -7689,17 +7679,14 @@ fu_engine_backend_device_changed_cb(FuBackend *backend, FuDevice *device, FuEngi
 		}
 	}
 
-	/* get the new GUsbDevice for emulated devices */
+	/* update the device for emulated devices */
 	for (guint i = 0; i < devices->len; i++) {
 		FuDevice *device_tmp = g_ptr_array_index(devices, i);
 		if (!fu_device_has_flag(device_tmp, FWUPD_DEVICE_FLAG_EMULATED))
 			continue;
-		if (!FU_IS_USB_DEVICE(device_tmp) || !FU_IS_USB_DEVICE(device))
-			continue;
-		if (g_strcmp0(fu_usb_device_get_platform_id(FU_USB_DEVICE(device_tmp)),
-			      fu_usb_device_get_platform_id(FU_USB_DEVICE(device))) == 0) {
-			g_debug("incorporating new GUsbDevice for %s",
-				fu_device_get_id(device_tmp));
+		if (g_strcmp0(fu_device_get_backend_id(device_tmp),
+			      fu_device_get_backend_id(device)) == 0) {
+			g_debug("incorporating new device for %s", fu_device_get_id(device_tmp));
 			fu_device_incorporate(device_tmp, device);
 		}
 	}
@@ -7948,7 +7935,12 @@ fu_engine_context_set_battery_threshold(FuContext *ctx)
 		minimum_battery = MINIMUM_BATTERY_PERCENTAGE_FALLBACK;
 	} else {
 		g_autoptr(GError) error_local = NULL;
-		if (!fu_strtoull(battery_str, &minimum_battery, 0, 100, &error_local)) {
+		if (!fu_strtoull(battery_str,
+				 &minimum_battery,
+				 0,
+				 100,
+				 FU_INTEGER_BASE_AUTO,
+				 &error_local)) {
 			g_warning("invalid minimum battery level specified: %s",
 				  error_local->message);
 			minimum_battery = MINIMUM_BATTERY_PERCENTAGE_FALLBACK;
@@ -8571,10 +8563,24 @@ fu_engine_set_property(GObject *object, guint prop_id, const GValue *value, GPar
 }
 
 static void
+fu_engine_dispose(GObject *obj)
+{
+	FuEngine *self = FU_ENGINE(obj);
+
+	if (self->plugin_list != NULL)
+		g_object_run_dispose(G_OBJECT(self->plugin_list));
+	if (self->device_list != NULL)
+		g_object_run_dispose(G_OBJECT(self->device_list));
+
+	G_OBJECT_CLASS(fu_engine_parent_class)->dispose(obj);
+}
+
+static void
 fu_engine_class_init(FuEngineClass *klass)
 {
 	GParamSpec *pspec;
 	GObjectClass *object_class = G_OBJECT_CLASS(klass);
+	object_class->dispose = fu_engine_dispose;
 	object_class->finalize = fu_engine_finalize;
 	object_class->get_property = fu_engine_get_property;
 	object_class->set_property = fu_engine_set_property;
@@ -8808,9 +8814,7 @@ fu_engine_constructed(GObject *obj)
 			 self);
 
 	/* backends */
-#ifdef HAVE_GUSB
 	g_ptr_array_add(self->backends, fu_usb_backend_new(self->ctx));
-#endif
 #ifdef HAVE_GUDEV
 	g_ptr_array_add(self->backends, fu_udev_backend_new(self->ctx));
 #endif
@@ -8834,9 +8838,6 @@ fu_engine_constructed(GObject *obj)
 
 	/* add some runtime versions of things the daemon depends on */
 	fu_engine_add_runtime_version(self, "org.freedesktop.fwupd", VERSION);
-#ifdef HAVE_GUSB
-	fu_engine_add_runtime_version(self, "org.freedesktop.gusb", g_usb_version_string());
-#endif
 	fu_engine_add_runtime_version(self, "com.hughsie.libjcat", jcat_version_string());
 #if LIBXMLB_CHECK_VERSION(0, 3, 19)
 	fu_engine_add_runtime_version(self, "com.hughsie.libxmlb", xb_version_string());
@@ -8852,15 +8853,7 @@ fu_engine_constructed(GObject *obj)
 #endif
 
 	fu_context_add_compile_version(self->ctx, "org.freedesktop.fwupd", VERSION);
-#ifdef HAVE_GUSB
-	{
-		g_autofree gchar *version = g_strdup_printf("%i.%i.%i",
-							    G_USB_MAJOR_VERSION,
-							    G_USB_MINOR_VERSION,
-							    G_USB_MICRO_VERSION);
-		fu_context_add_compile_version(self->ctx, "org.freedesktop.gusb", version);
-	}
-#endif
+	fu_context_add_compile_version(self->ctx, "info.libusb", LIBUSB_VERSION);
 #ifdef HAVE_PASSIM
 	{
 		g_autofree gchar *version = g_strdup_printf("%i.%i.%i",

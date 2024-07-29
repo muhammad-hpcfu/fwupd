@@ -11,9 +11,6 @@
 #include <glib/gi18n.h>
 #include <stdio.h>
 #include <unistd.h>
-#ifdef HAVE_GUSB
-#include <gusb.h>
-#endif
 
 #include <xmlb.h>
 #ifdef HAVE_LIBCURL
@@ -1492,7 +1489,7 @@ fu_util_device_to_string(FwupdClient *client, FwupdDevice *dev, guint idt)
 			bullet = g_strdup_printf("• %s", desc);
 			color = fu_console_color_format(bullet, FU_CONSOLE_COLOR_RED);
 			fwupd_codec_string_append(str, idt + 1, tmp, color);
-			tmp = NULL;
+			tmp = "";
 		}
 	}
 

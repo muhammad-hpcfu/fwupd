@@ -150,13 +150,13 @@ fu_dell_dock_tbt_set_quirk_kv(FuDevice *device,
 	guint64 tmp = 0;
 
 	if (g_strcmp0(key, "DellDockUnlockTarget") == 0) {
-		if (!fu_strtoull(value, &tmp, 0, G_MAXUINT8, error))
+		if (!fu_strtoull(value, &tmp, 0, G_MAXUINT8, FU_INTEGER_BASE_AUTO, error))
 			return FALSE;
 		self->unlock_target = tmp;
 		return TRUE;
 	}
 	if (g_strcmp0(key, "DellDockInstallDurationI2C") == 0) {
-		if (!fu_strtoull(value, &tmp, 0, 60 * 60 * 24, error))
+		if (!fu_strtoull(value, &tmp, 0, 60 * 60 * 24, FU_INTEGER_BASE_AUTO, error))
 			return FALSE;
 		fu_device_set_install_duration(device, tmp);
 		return TRUE;
@@ -166,13 +166,13 @@ fu_dell_dock_tbt_set_quirk_kv(FuDevice *device,
 		return TRUE;
 	}
 	if (g_strcmp0(key, "DellDockBlobMajorOffset") == 0) {
-		if (!fu_strtoull(value, &tmp, 0, G_MAXUINT32, error))
+		if (!fu_strtoull(value, &tmp, 0, G_MAXUINT32, FU_INTEGER_BASE_AUTO, error))
 			return FALSE;
 		self->blob_major_offset = tmp;
 		return TRUE;
 	}
 	if (g_strcmp0(key, "DellDockBlobMinorOffset") == 0) {
-		if (!fu_strtoull(value, &tmp, 0, G_MAXUINT32, error))
+		if (!fu_strtoull(value, &tmp, 0, G_MAXUINT32, FU_INTEGER_BASE_AUTO, error))
 			return FALSE;
 		self->blob_minor_offset = tmp;
 		return TRUE;
@@ -229,7 +229,7 @@ fu_dell_dock_tbt_probe(FuDevice *device, GError **error)
 	FuDevice *parent = fu_device_get_parent(device);
 	fu_device_set_physical_id(device, fu_device_get_physical_id(parent));
 	fu_device_set_logical_id(FU_DEVICE(device), "tbt");
-	fu_device_add_instance_id(device, DELL_DOCK_TBT_INSTANCE_ID);
+	fu_device_add_instance_id(device, DELL_DOCK_TBT3);
 	/* this is true only when connected to non-thunderbolt port */
 	fu_device_add_flag(device, FWUPD_DEVICE_FLAG_USABLE_DURING_UPDATE);
 

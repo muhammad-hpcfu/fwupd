@@ -107,8 +107,10 @@ fu_ipmi_device_send(FuIpmiDevice *self,
 	return fu_udev_device_ioctl(FU_UDEV_DEVICE(self),
 				    IPMICTL_SEND_COMMAND,
 				    (guint8 *)&req,
+				    sizeof(req),
 				    NULL,
 				    FU_IPMI_DEVICE_IOCTL_TIMEOUT,
+				    FU_UDEV_DEVICE_IOCTL_FLAG_NONE,
 				    error);
 }
 
@@ -132,8 +134,10 @@ fu_ipmi_device_recv(FuIpmiDevice *self,
 	if (!fu_udev_device_ioctl(FU_UDEV_DEVICE(self),
 				  IPMICTL_RECEIVE_MSG_TRUNC,
 				  (guint8 *)&recv,
+				  sizeof(recv),
 				  NULL,
 				  FU_IPMI_DEVICE_IOCTL_TIMEOUT,
+				  FU_UDEV_DEVICE_IOCTL_FLAG_NONE,
 				  error))
 		return FALSE;
 	fu_dump_raw(G_LOG_DOMAIN, "ipmi-recv", buf, bufsz);

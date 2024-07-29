@@ -1,1 +1,1 @@
-../TpmActivation/dell_modifier
+[SuppressIf:TpmSecurity=Disabled]

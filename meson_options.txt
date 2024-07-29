@@ -78,14 +78,6 @@ option('gudev',
     'false': 'disabled',
   },
 )
-option('gusb',
-  type: 'feature',
-  description: 'GUsb support',
-  deprecated: {
-    'true': 'enabled',
-    'false': 'disabled',
-  },
-)
 option('bluez',
   type: 'feature',
   description: 'BlueZ support',
@@ -478,10 +470,10 @@ option('curl',
     'false': 'disabled',
   },
 )
-option('udevdir',
+option('vendor_ids_dir',
   type: 'string',
   value: '',
-  description: 'Directory for udev rules',
+  description: 'Directory for usb.ids, pci.ids etc.',
 )
 option('vendor_metadata',
   type: 'boolean',

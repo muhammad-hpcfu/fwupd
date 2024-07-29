@@ -11,7 +11,7 @@ engine_dep = [
   giounix,
   gmodule,
   gudev,
-  gusb,
+  libusb,
   libjsonglib,
   polkit,
   sqlite,
@@ -25,7 +25,6 @@ endif
 
 client_dep = [
   gudev,
-  gusb,
   libcurl,
   libjcat,
   libjsonglib,
@@ -58,6 +57,7 @@ fwupd_engine_src = [
   'fu-remote.c',
   'fu-remote-list.c',
   'fu-security-attr-common.c',
+  'fu-usb-backend.c',
   'fu-client.c',
   'fu-client-list.c',
 ] + systemd_src
@@ -65,12 +65,8 @@ fwupd_engine_src = [
 if giounix.found()
   fwupd_engine_src += 'fu-unix-seekable-input-stream.c'
 endif
-
 if gudev.found()
   fwupd_engine_src += 'fu-udev-backend.c'
-endif
-if gusb.found()
-  fwupd_engine_src += 'fu-usb-backend.c'
 endif
 if bluez.allowed()
   fwupd_engine_src += 'fu-bluez-backend.c'
@@ -346,6 +342,7 @@ executable(
   sources: [
     daemon_loader_src,
     'fu-daemon.c',
+    'fu-dbus-daemon.c',
   ],
   include_directories: [
     root_incdir,

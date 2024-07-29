@@ -1,1 +1,1 @@
-../../../libfwupdplugin/tests/colorhug/firmware.txt
+hello world

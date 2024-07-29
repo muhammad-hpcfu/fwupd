@@ -1,1 +1,1 @@
-../KbdBacklightTimeoutAc/possible_values
+5s;10s;15s;30s;1m;5m;15m;Never;

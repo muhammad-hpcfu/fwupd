@@ -38,10 +38,9 @@ static gboolean
 fu_corsair_device_probe(FuDevice *device, GError **error)
 {
 	FuCorsairDevice *self = FU_CORSAIR_DEVICE(device);
-	GUsbDevice *usb_device = fu_usb_device_get_dev(FU_USB_DEVICE(device));
-	GUsbInterface *iface = NULL;
-	GUsbEndpoint *ep1 = NULL;
-	GUsbEndpoint *ep2 = NULL;
+	FuUsbInterface *iface = NULL;
+	FuUsbEndpoint *ep1 = NULL;
+	FuUsbEndpoint *ep2 = NULL;
 	g_autoptr(GPtrArray) ifaces = NULL;
 	g_autoptr(GPtrArray) endpoints = NULL;
 	guint16 cmd_write_size;
@@ -56,7 +55,7 @@ fu_corsair_device_probe(FuDevice *device, GError **error)
 	if (!FU_DEVICE_CLASS(fu_corsair_device_parent_class)->probe(device, error))
 		return FALSE;
 
-	ifaces = g_usb_device_get_interfaces(usb_device, error);
+	ifaces = fu_usb_device_get_interfaces(FU_USB_DEVICE(self), error);
 	if (ifaces == NULL || (ifaces->len < (self->vendor_interface + 1u))) {
 		g_set_error_literal(error,
 				    FWUPD_ERROR,
@@ -66,7 +65,7 @@ fu_corsair_device_probe(FuDevice *device, GError **error)
 	}
 
 	iface = g_ptr_array_index(ifaces, self->vendor_interface);
-	endpoints = g_usb_interface_get_endpoints(iface);
+	endpoints = fu_usb_interface_get_endpoints(iface);
 	/* expecting to have two endpoints for communication */
 	if (endpoints == NULL || endpoints->len != 2) {
 		g_set_error_literal(error,
@@ -78,16 +77,16 @@ fu_corsair_device_probe(FuDevice *device, GError **error)
 
 	ep1 = g_ptr_array_index(endpoints, 0);
 	ep2 = g_ptr_array_index(endpoints, 1);
-	if (g_usb_endpoint_get_direction(ep1) == G_USB_DEVICE_DIRECTION_DEVICE_TO_HOST) {
-		epin = g_usb_endpoint_get_address(ep1);
-		epout = g_usb_endpoint_get_address(ep2);
-		cmd_read_size = g_usb_endpoint_get_maximum_packet_size(ep1);
-		cmd_write_size = g_usb_endpoint_get_maximum_packet_size(ep2);
+	if (fu_usb_endpoint_get_direction(ep1) == FU_USB_DIRECTION_DEVICE_TO_HOST) {
+		epin = fu_usb_endpoint_get_address(ep1);
+		epout = fu_usb_endpoint_get_address(ep2);
+		cmd_read_size = fu_usb_endpoint_get_maximum_packet_size(ep1);
+		cmd_write_size = fu_usb_endpoint_get_maximum_packet_size(ep2);
 	} else {
-		epin = g_usb_endpoint_get_address(ep2);
-		epout = g_usb_endpoint_get_address(ep1);
-		cmd_read_size = g_usb_endpoint_get_maximum_packet_size(ep2);
-		cmd_write_size = g_usb_endpoint_get_maximum_packet_size(ep1);
+		epin = fu_usb_endpoint_get_address(ep2);
+		epout = fu_usb_endpoint_get_address(ep1);
+		cmd_read_size = fu_usb_endpoint_get_maximum_packet_size(ep2);
+		cmd_write_size = fu_usb_endpoint_get_maximum_packet_size(ep1);
 	}
 
 	if (cmd_write_size > FU_CORSAIR_MAX_CMD_SIZE || cmd_read_size > FU_CORSAIR_MAX_CMD_SIZE) {
@@ -100,7 +99,7 @@ fu_corsair_device_probe(FuDevice *device, GError **error)
 
 	fu_usb_device_add_interface(FU_USB_DEVICE(self), self->vendor_interface);
 
-	self->bp = fu_corsair_bp_new(usb_device, FALSE);
+	self->bp = fu_corsair_bp_new(FU_USB_DEVICE(device), FALSE);
 	fu_corsair_bp_set_cmd_size(self->bp, cmd_write_size, cmd_read_size);
 	fu_corsair_bp_set_endpoints(self->bp, epin, epout);
 
@@ -111,7 +110,6 @@ static gboolean
 fu_corsair_poll_subdevice(FuDevice *device, gboolean *subdevice_added, GError **error)
 {
 	FuCorsairDevice *self = FU_CORSAIR_DEVICE(device);
-	GUsbDevice *usb_device = fu_usb_device_get_dev(FU_USB_DEVICE(device));
 	guint32 subdevices;
 	g_autoptr(FuCorsairDevice) child = NULL;
 	g_autoptr(FuCorsairBp) child_bp = NULL;
@@ -129,7 +127,7 @@ fu_corsair_poll_subdevice(FuDevice *device, gboolean *subdevice_added, GError **
 		return TRUE;
 	}
 
-	child_bp = fu_corsair_bp_new(usb_device, TRUE);
+	child_bp = fu_corsair_bp_new(FU_USB_DEVICE(device), TRUE);
 	fu_device_incorporate(FU_DEVICE(child_bp), FU_DEVICE(self->bp));
 
 	child = fu_corsair_device_new(self, child_bp);
@@ -459,7 +457,12 @@ fu_corsair_set_quirk_kv(FuDevice *device, const gchar *key, const gchar *value, 
 	}
 	if (g_strcmp0(key, "CorsairVendorInterfaceId") == 0) {
 		/* clapped to uint8 because bNumInterfaces is 8 bits long */
-		if (!fu_strtoull(value, &vendor_interface, 0, 255, error)) {
+		if (!fu_strtoull(value,
+				 &vendor_interface,
+				 0,
+				 G_MAXUINT8,
+				 FU_INTEGER_BASE_AUTO,
+				 error)) {
 			g_prefix_error(error, "cannot parse CorsairVendorInterface: ");
 			return FALSE;
 		}
@@ -568,14 +571,12 @@ static FuCorsairDevice *
 fu_corsair_device_new(FuCorsairDevice *parent, FuCorsairBp *bp)
 {
 	FuCorsairDevice *self = NULL;
-	FuDevice *device = FU_DEVICE(parent);
 
 	self = g_object_new(FU_TYPE_CORSAIR_DEVICE,
 			    "context",
-			    fu_device_get_context(device),
-			    "usb_device",
-			    fu_usb_device_get_dev(FU_USB_DEVICE(device)),
+			    fu_device_get_context(FU_DEVICE(parent)),
 			    NULL);
+	fu_device_incorporate(FU_DEVICE(self), FU_DEVICE(parent));
 	self->bp = g_object_ref(bp);
 	return self;
 }

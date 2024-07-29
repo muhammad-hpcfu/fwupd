@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 # pylint: disable=invalid-name,missing-module-docstring,missing-function-docstring
 #
 # Copyright 2021 Richard Hughes <richard@hughsie.com>
@@ -14,7 +14,7 @@ from typing import List
 
 def __get_includes(fn: str) -> List[str]:
     includes: List[str] = []
-    with open(fn, "r") as f:
+    with open(fn) as f:
         for line in f.read().split("\n"):
             if line.find("#include") == -1:
                 continue

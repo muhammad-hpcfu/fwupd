@@ -96,8 +96,10 @@ fu_nvme_device_submit_admin_passthru(FuNvmeDevice *self, struct nvme_admin_cmd *
 	if (!fu_udev_device_ioctl(FU_UDEV_DEVICE(self),
 				  NVME_IOCTL_ADMIN_CMD,
 				  (guint8 *)cmd,
+				  sizeof(*cmd),
 				  &rc,
 				  FU_NVME_DEVICE_IOCTL_TIMEOUT,
+				  FU_UDEV_DEVICE_IOCTL_FLAG_NONE,
 				  error)) {
 		g_prefix_error(error, "failed to issue admin command 0x%02x: ", cmd->opcode);
 		return FALSE;
@@ -270,22 +272,15 @@ fu_nvme_device_parse_cns(FuNvmeDevice *self, const guint8 *buf, gsize sz, GError
  * %FALSE: device is, probably, NVMe-over-Fabrics
  */
 static gboolean
-fu_nvme_device_is_pci(FuDevice *device, GError **error)
+fu_nvme_device_is_pci(FuNvmeDevice *self, GError **error)
 {
-	g_autoptr(GUdevDevice) device_tmp = NULL;
-	GUdevDevice *gdev;
+	g_autoptr(FuDevice) parent_pci = NULL;
 
-	gdev = fu_udev_device_get_dev(FU_UDEV_DEVICE(device));
-
-	device_tmp = g_udev_device_get_parent_with_subsystem(gdev, "pci", NULL);
-	if (device_tmp == NULL) {
-		g_set_error(error,
-			    FWUPD_ERROR,
-			    FWUPD_ERROR_NOT_SUPPORTED,
-			    "device is not on PCI subsystem");
+	parent_pci = fu_device_get_backend_parent_with_kind(FU_DEVICE(self), "pci", error);
+	if (parent_pci == NULL)
 		return FALSE;
-	}
 
+	/* success */
 	return TRUE;
 }
 
@@ -303,7 +298,7 @@ fu_nvme_device_probe(FuDevice *device, GError **error)
 		fu_device_set_vendor(FU_DEVICE(device), "Samsung");
 
 	/* ignore non-PCI NVMe devices */
-	if (!fu_nvme_device_is_pci(device, error))
+	if (!fu_nvme_device_is_pci(self, error))
 		return FALSE;
 
 	/* set the physical ID */
@@ -311,7 +306,7 @@ fu_nvme_device_probe(FuDevice *device, GError **error)
 		return FALSE;
 
 	/* look at the PCI depth to work out if in an external enclosure */
-	self->pci_depth = fu_udev_device_get_slot_depth(FU_UDEV_DEVICE(device), "pci");
+	self->pci_depth = fu_udev_device_get_subsystem_depth(FU_UDEV_DEVICE(device), "pci");
 	if (self->pci_depth <= 2) {
 		fu_device_add_flag(device, FWUPD_DEVICE_FLAG_INTERNAL);
 		fu_device_add_flag(device, FWUPD_DEVICE_FLAG_USABLE_DURING_UPDATE);
@@ -437,7 +432,7 @@ fu_nvme_device_set_quirk_kv(FuDevice *device, const gchar *key, const gchar *val
 	FuNvmeDevice *self = FU_NVME_DEVICE(device);
 	if (g_strcmp0(key, "NvmeBlockSize") == 0) {
 		guint64 tmp = 0;
-		if (!fu_strtoull(value, &tmp, 0, G_MAXUINT32, error))
+		if (!fu_strtoull(value, &tmp, 0, G_MAXUINT32, FU_INTEGER_BASE_AUTO, error))
 			return FALSE;
 		self->write_block_size = tmp;
 		return TRUE;
@@ -471,7 +466,7 @@ fu_nvme_device_init(FuNvmeDevice *self)
 	fu_device_set_summary(FU_DEVICE(self), "NVM Express solid state drive");
 	fu_device_add_icon(FU_DEVICE(self), "drive-harddisk");
 	fu_device_add_protocol(FU_DEVICE(self), "org.nvmexpress");
-	fu_udev_device_add_flag(FU_UDEV_DEVICE(self), FU_UDEV_DEVICE_FLAG_OPEN_READ);
+	fu_udev_device_add_open_flag(FU_UDEV_DEVICE(self), FU_IO_CHANNEL_OPEN_FLAG_READ);
 	fu_udev_device_add_flag(FU_UDEV_DEVICE(self), FU_UDEV_DEVICE_FLAG_VENDOR_FROM_PARENT);
 	fu_device_register_private_flag(FU_DEVICE(self),
 					FU_NVME_DEVICE_FLAG_FORCE_ALIGN,

@@ -20,6 +20,7 @@
 #include "fu-config-private.h"
 #include "fu-context-private.h"
 #include "fu-coswid-firmware.h"
+#include "fu-device-event-private.h"
 #include "fu-device-private.h"
 #include "fu-device-progress.h"
 #include "fu-dummy-efivars.h"
@@ -30,6 +31,7 @@
 #include "fu-security-attrs-private.h"
 #include "fu-self-test-struct.h"
 #include "fu-smbios-private.h"
+#include "fu-test-device.h"
 #include "fu-volume-private.h"
 
 static GMainLoop *_test_loop = NULL;
@@ -205,9 +207,20 @@ fu_common_crc_func(void)
 	guint8 buf[] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09};
 	g_assert_cmpint(fu_crc8(buf, sizeof(buf)), ==, 0x7A);
 	g_assert_cmpint(fu_crc16(buf, sizeof(buf)), ==, 0x4DF1);
-	g_assert_cmpint(fu_crc32(buf, sizeof(buf)), ==, 0x40EFAB9E);
 	g_assert_cmpint(fu_misr16(0, buf, (sizeof(buf) / 2) * 2), ==, 0x40D);
 	g_assert_cmpint(fu_misr16(0xFFFF, buf, (sizeof(buf) / 2) * 2), ==, 0xFBFA);
+
+	/* all the CRC32 variants, verified using https://crccalc.com/?method=CRC-32 */
+	g_assert_cmpint(fu_crc32(FU_CRC32_KIND_STANDARD, buf, sizeof(buf)), ==, 0x40EFAB9E);
+	g_assert_cmpint(fu_crc32(FU_CRC32_KIND_BZIP2, buf, sizeof(buf)), ==, 0x89AE7A5C);
+	g_assert_cmpint(fu_crc32(FU_CRC32_KIND_JAMCRC, buf, sizeof(buf)), ==, 0xBF105461);
+	g_assert_cmpint(fu_crc32(FU_CRC32_KIND_MPEG2, buf, sizeof(buf)), ==, 0x765185A3);
+	g_assert_cmpint(fu_crc32(FU_CRC32_KIND_POSIX, buf, sizeof(buf)), ==, 0x037915C4);
+	g_assert_cmpint(fu_crc32(FU_CRC32_KIND_SATA, buf, sizeof(buf)), ==, 0xBA55CCAC);
+	g_assert_cmpint(fu_crc32(FU_CRC32_KIND_XFER, buf, sizeof(buf)), ==, 0x868E70FC);
+	g_assert_cmpint(fu_crc32(FU_CRC32_KIND_C, buf, sizeof(buf)), ==, 0x5A14B9F9);
+	g_assert_cmpint(fu_crc32(FU_CRC32_KIND_D, buf, sizeof(buf)), ==, 0x68AD8D3C);
+	g_assert_cmpint(fu_crc32(FU_CRC32_KIND_Q, buf, sizeof(buf)), ==, 0xE955C875);
 }
 
 static void
@@ -361,12 +374,6 @@ fu_device_metadata_func(void)
 	g_assert_cmpstr(fu_device_get_metadata(device, "bam"), ==, "12345");
 	g_assert_cmpint(fu_device_get_metadata_integer(device, "bam"), ==, 12345);
 	g_assert_cmpint(fu_device_get_metadata_integer(device, "unknown"), ==, G_MAXUINT);
-
-	/* broken integer */
-	fu_device_set_metadata(device, "bam", "123junk");
-	g_assert_cmpint(fu_device_get_metadata_integer(device, "bam"), ==, G_MAXUINT);
-	fu_device_set_metadata(device, "huge", "4294967296"); /* not 32 bit */
-	g_assert_cmpint(fu_device_get_metadata_integer(device, "huge"), ==, G_MAXUINT);
 }
 
 static void
@@ -1258,6 +1265,41 @@ fu_plugin_quirks_append_func(void)
 }
 
 static void
+fu_quirks_vendor_ids_func(void)
+{
+	gboolean ret;
+	const gchar *tmp;
+	g_autofree gchar *guid1 = fwupd_guid_hash_string("PCI\\VEN_8086");
+	g_autofree gchar *guid2 = fwupd_guid_hash_string("USB\\VID_8086");
+	g_autofree gchar *guid3 = fwupd_guid_hash_string("PNP\\VID_ICO");
+	g_autofree gchar *datadata = fu_path_from_kind(FU_PATH_KIND_CACHEDIR_PKG);
+	g_autofree gchar *quirksdb = g_build_filename(datadata, "quirks.db", NULL);
+	g_autoptr(FuQuirks) quirks = fu_quirks_new();
+	g_autoptr(GError) error = NULL;
+
+#ifndef HAVE_SQLITE
+	g_test_skip("no sqlite");
+	return;
+#endif
+	g_debug("deleting %s if exists", quirksdb);
+	g_unlink(quirksdb);
+
+	/* lookup a duplicate group name */
+	ret = fu_quirks_load(quirks, FU_QUIRKS_LOAD_FLAG_NONE, &error);
+	g_assert_no_error(error);
+	g_assert_true(ret);
+	tmp = fu_quirks_lookup_by_id(quirks, guid1, "Vendor");
+	g_assert_true(ret);
+	g_assert_cmpstr(tmp, ==, "Intel Corporation");
+	tmp = fu_quirks_lookup_by_id(quirks, guid2, "Vendor");
+	g_assert_true(ret);
+	g_assert_cmpstr(tmp, ==, "Intel Corp.");
+	tmp = fu_quirks_lookup_by_id(quirks, guid3, "Vendor");
+	g_assert_true(ret);
+	g_assert_cmpstr(tmp, ==, "Intel Corp");
+}
+
+static void
 fu_plugin_func(void)
 {
 	GHashTable *metadata;
@@ -1306,12 +1348,12 @@ fu_plugin_device_gtype_func(void)
 	g_assert_cmpint(fu_plugin_get_device_gtype_default(plugin), ==, FU_TYPE_DEVICE);
 
 	/* now there's no explicit default */
-	fu_plugin_add_device_gtype(plugin, FU_TYPE_USB_DEVICE);
+	fu_plugin_add_device_gtype(plugin, FU_TYPE_TEST_DEVICE);
 	g_assert_cmpint(fu_plugin_get_device_gtype_default(plugin), ==, G_TYPE_INVALID);
 
 	/* make it explicit */
-	fu_plugin_set_device_gtype_default(plugin, FU_TYPE_USB_DEVICE);
-	g_assert_cmpint(fu_plugin_get_device_gtype_default(plugin), ==, FU_TYPE_USB_DEVICE);
+	fu_plugin_set_device_gtype_default(plugin, FU_TYPE_TEST_DEVICE);
+	g_assert_cmpint(fu_plugin_get_device_gtype_default(plugin), ==, FU_TYPE_TEST_DEVICE);
 }
 
 static void
@@ -1355,6 +1397,7 @@ fu_plugin_backend_proxy_device_func(void)
 	g_autoptr(GError) error = NULL;
 
 	fu_device_set_id(device, "testdev");
+	fu_device_add_flag(device, FWUPD_DEVICE_FLAG_EMULATED);
 	ret = fu_plugin_runner_backend_device_changed(plugin, device, &error);
 	g_assert_no_error(error);
 	g_assert_true(ret);
@@ -1366,7 +1409,7 @@ fu_plugin_backend_proxy_device_func(void)
 			 &device_new);
 
 	fu_device_set_specialized_gtype(device, FU_TYPE_DEVICE);
-	fu_device_set_proxy_gtype(device, FU_TYPE_HID_DEVICE);
+	fu_device_set_proxy_gtype(device, FU_TYPE_TEST_DEVICE);
 	ret = fu_plugin_runner_backend_device_added(plugin, device, progress, &error);
 	g_assert_no_error(error);
 	g_assert_true(ret);
@@ -1378,7 +1421,7 @@ fu_plugin_backend_proxy_device_func(void)
 	/* check proxy was constructed */
 	proxy = fu_device_get_proxy(device_new);
 	g_assert_nonnull(proxy);
-	g_assert_true(FU_IS_USB_DEVICE(proxy));
+	g_assert_true(FU_IS_TEST_DEVICE(proxy));
 }
 
 static void
@@ -1645,6 +1688,49 @@ fu_device_func(void)
 	fu_device_add_possible_plugin(device, "test");
 	possible_plugins = fu_device_get_possible_plugins(device);
 	g_assert_cmpint(possible_plugins->len, ==, 1);
+}
+
+static void
+fu_device_event_func(void)
+{
+	gboolean ret;
+	const gchar *str;
+	g_autofree gchar *json = NULL;
+	g_autoptr(FuDeviceEvent) event1 = fu_device_event_new("foo:bar:baz");
+	g_autoptr(FuDeviceEvent) event2 = fu_device_event_new(NULL);
+	g_autoptr(GBytes) blob1 = g_bytes_new_static("hello", 6);
+	g_autoptr(GBytes) blob2 = NULL;
+	g_autoptr(GError) error = NULL;
+
+	fu_device_event_set_str(event1, "Name", "Richard");
+	fu_device_event_set_i64(event1, "Age", 123);
+	fu_device_event_set_bytes(event1, "Blob", blob1);
+
+	json = fwupd_codec_to_json_string(FWUPD_CODEC(event1), FWUPD_CODEC_FLAG_NONE, &error);
+	g_assert_no_error(error);
+	g_assert_cmpstr(json,
+			==,
+			"{\n"
+			"  \"Id\" : \"foo:bar:baz\",\n"
+			"  \"Age\" : 123,\n"
+			"  \"Name\" : \"Richard\",\n"
+			"  \"Blob\" : \"aGVsbG8A\"\n"
+			"}");
+
+	ret = fwupd_codec_from_json_string(FWUPD_CODEC(event2), json, &error);
+	g_assert_no_error(error);
+	g_assert_true(ret);
+	g_assert_cmpstr(fu_device_event_get_id(event2), ==, "foo:bar:baz");
+	g_assert_cmpint(fu_device_event_get_i64(event2, "Age", NULL), ==, 123);
+	g_assert_cmpstr(fu_device_event_get_str(event2, "Name", NULL), ==, "Richard");
+	blob2 = fu_device_event_get_bytes(event2, "Blob", &error);
+	g_assert_nonnull(blob2);
+	g_assert_cmpstr(g_bytes_get_data(blob2, NULL), ==, "hello");
+
+	/* invalid type */
+	str = fu_device_event_get_str(event2, "Age", &error);
+	g_assert_error(error, FWUPD_ERROR, FWUPD_ERROR_INVALID_DATA);
+	g_assert_null(str);
 }
 
 static void
@@ -1995,17 +2081,17 @@ fu_device_incorporate_descendant_func(void)
 {
 	g_autoptr(FuContext) ctx = fu_context_new();
 	g_autoptr(FuDevice) device = fu_device_new(ctx);
-	g_autoptr(FuUsbDevice) usb_device = fu_usb_device_new(ctx, NULL);
+	g_autoptr(FuTestDevice) test_device = g_object_new(FU_TYPE_TEST_DEVICE, NULL);
 
 	fu_device_set_name(device, "FuDevice");
-	fu_device_set_summary(FU_DEVICE(usb_device), "FuUsbDevice");
+	fu_device_set_summary(FU_DEVICE(test_device), "FuTestDevice");
 
-	fu_device_incorporate(FU_DEVICE(usb_device), device);
-	g_assert_cmpstr(fu_device_get_name(FU_DEVICE(usb_device)), ==, "FuDevice");
+	fu_device_incorporate(FU_DEVICE(test_device), device);
+	g_assert_cmpstr(fu_device_get_name(FU_DEVICE(test_device)), ==, "FuDevice");
 
 	/* this won't explode as device_class->incorporate is checking types */
-	fu_device_incorporate(device, FU_DEVICE(usb_device));
-	g_assert_cmpstr(fu_device_get_summary(device), ==, "FuUsbDevice");
+	fu_device_incorporate(device, FU_DEVICE(test_device));
+	g_assert_cmpstr(fu_device_get_summary(device), ==, "FuTestDevice");
 }
 
 static void
@@ -2045,14 +2131,14 @@ fu_device_incorporate_func(void)
 
 	/* base properties */
 	fu_device_add_flag(donor, FWUPD_DEVICE_FLAG_REQUIRE_AC);
-	fu_device_set_created(donor, 123);
-	fu_device_set_modified(donor, 456);
+	fu_device_set_created_usec(donor, 1514338000ull * G_USEC_PER_SEC);
+	fu_device_set_modified_usec(donor, 1514338999ull * G_USEC_PER_SEC);
 	fu_device_add_icon(donor, "computer");
 
 	/* existing properties */
 	fu_device_set_equivalent_id(device, "DO_NOT_OVERWRITE");
 	fu_device_set_metadata(device, "test2", "DO_NOT_OVERWRITE");
-	fu_device_set_modified(device, 789);
+	fu_device_set_modified_usec(device, 1514340000ull * G_USEC_PER_SEC);
 
 	/* incorporate properties from donor to device */
 	fu_device_incorporate(device, donor);
@@ -2060,14 +2146,174 @@ fu_device_incorporate_func(void)
 	g_assert_cmpstr(fu_device_get_metadata(device, "test"), ==, "me");
 	g_assert_cmpstr(fu_device_get_metadata(device, "test2"), ==, "DO_NOT_OVERWRITE");
 	g_assert_true(fu_device_has_flag(device, FWUPD_DEVICE_FLAG_REQUIRE_AC));
-	g_assert_cmpint(fu_device_get_created(device), ==, 123);
-	g_assert_cmpint(fu_device_get_modified(device), ==, 789);
+	g_assert_cmpint(fu_device_get_created_usec(device), ==, 1514338000ull * G_USEC_PER_SEC);
+	g_assert_cmpint(fu_device_get_modified_usec(device), ==, 1514340000ull * G_USEC_PER_SEC);
 	g_assert_cmpint(fu_device_get_icons(device)->len, ==, 1);
 	ret = fu_device_build_instance_id(device, &error, "USB", "VID", NULL);
 	g_assert_no_error(error);
 	g_assert_true(ret);
 	g_assert_true(fu_device_has_instance_id(device, "USB\\VID_0A5C"));
 	g_assert_cmpstr(fu_device_get_custom_flags(device), ==, "ignore-runtime");
+}
+
+static void
+fu_backend_emulate_count_cb(FuBackend *backend, FuDevice *device, gpointer user_data)
+{
+	guint *cnt = (guint *)user_data;
+	(*cnt)++;
+}
+
+static void
+fu_backend_emulate_func(void)
+{
+	gboolean ret;
+	guint8 buf[] = {0x00, 0x00};
+	guint added_cnt = 0;
+	guint changed_cnt = 0;
+	guint removed_cnt = 0;
+	FuDevice *device;
+	g_autofree gchar *json3 = NULL;
+	g_autoptr(FuBackend) backend = NULL;
+	g_autoptr(FuContext) ctx = fu_context_new();
+	g_autoptr(GError) error = NULL;
+	const gchar *json1 = "{"
+			     "  \"UdevDevices\" : ["
+			     "    {"
+			     "      \"BackendId\" : \"foo:bar:baz\","
+			     "      \"Created\" : \"2023-02-01T16:35:03.302027Z\","
+			     "      \"Events\" : ["
+			     "        {"
+			     "          \"Id\" : \"Ioctl:Request=0x007b,Data=AAA=,Length=0x2\","
+			     "          \"Data\" : \"Aw==\""
+			     "        },"
+			     "        {"
+			     "          \"Id\" : \"Ioctl:Request=0x007b,Data=AAA=,Length=0x2\","
+			     "          \"Data\" : \"Aw==\""
+			     "        }"
+			     "      ]"
+			     "    }"
+			     "  ]"
+			     "}";
+	const gchar *json2 = "{\n"
+			     "  \"UdevDevices\" : [\n"
+			     "    {\n"
+			     "      \"BackendId\" : \"usb:FF:FF:06\",\n"
+			     "      \"Created\" : \"2099-02-01T16:35:03Z\"\n"
+			     "    }\n"
+			     "  ]\n"
+			     "}";
+
+	/* watch events */
+	backend = g_object_new(FU_TYPE_BACKEND,
+			       "context",
+			       ctx,
+			       "name",
+			       "udev",
+			       "device-gtype",
+			       FU_TYPE_UDEV_DEVICE,
+			       NULL);
+	g_signal_connect(FU_BACKEND(backend),
+			 "device-added",
+			 G_CALLBACK(fu_backend_emulate_count_cb),
+			 &added_cnt);
+	g_signal_connect(FU_BACKEND(backend),
+			 "device-removed",
+			 G_CALLBACK(fu_backend_emulate_count_cb),
+			 &removed_cnt);
+	g_signal_connect(FU_BACKEND(backend),
+			 "device-changed",
+			 G_CALLBACK(fu_backend_emulate_count_cb),
+			 &changed_cnt);
+
+	/* parse */
+	ret = fwupd_codec_from_json_string(FWUPD_CODEC(backend), json1, &error);
+	g_assert_no_error(error);
+	g_assert(ret);
+	g_assert_cmpint(added_cnt, ==, 1);
+	g_assert_cmpint(removed_cnt, ==, 0);
+	g_assert_cmpint(changed_cnt, ==, 0);
+
+	/* get device */
+	device = fu_backend_lookup_by_id(backend, "foo:bar:baz");
+	g_assert_no_error(error);
+	g_assert_nonnull(device);
+	g_assert_true(fu_device_has_flag(device, FWUPD_DEVICE_FLAG_EMULATED));
+
+#ifndef HAVE_IOCTL_H
+	g_test_skip("no <ioctl.h> support");
+	return;
+#endif
+
+	/* in-order */
+	ret = fu_udev_device_ioctl(FU_UDEV_DEVICE(device),
+				   123,
+				   buf,
+				   sizeof(buf),
+				   NULL,
+				   0,
+				   FU_UDEV_DEVICE_IOCTL_FLAG_NONE,
+				   &error);
+	g_assert_no_error(error);
+	g_assert(ret);
+
+	/* in-order, repeat */
+	buf[0] = 0x00;
+	buf[1] = 0x00;
+	ret = fu_udev_device_ioctl(FU_UDEV_DEVICE(device),
+				   123,
+				   buf,
+				   sizeof(buf),
+				   NULL,
+				   0,
+				   FU_UDEV_DEVICE_IOCTL_FLAG_NONE,
+				   &error);
+	g_assert_no_error(error);
+	g_assert(ret);
+
+	/* out-of-order */
+	buf[0] = 0x00;
+	buf[1] = 0x00;
+	ret = fu_udev_device_ioctl(FU_UDEV_DEVICE(device),
+				   123,
+				   buf,
+				   sizeof(buf),
+				   NULL,
+				   0,
+				   FU_UDEV_DEVICE_IOCTL_FLAG_NONE,
+				   &error);
+	g_assert_no_error(error);
+	g_assert(ret);
+
+	/* load the same data */
+	ret = fwupd_codec_from_json_string(FWUPD_CODEC(backend), json1, &error);
+	g_assert_no_error(error);
+	g_assert(ret);
+	g_assert_cmpint(added_cnt, ==, 1);
+	g_assert_cmpint(removed_cnt, ==, 0);
+	g_assert_cmpint(changed_cnt, ==, 1);
+	device = fu_backend_lookup_by_id(backend, "foo:bar:baz");
+	g_assert_no_error(error);
+	g_assert_nonnull(device);
+	g_assert_true(fu_device_has_flag(device, FWUPD_DEVICE_FLAG_EMULATED));
+
+	/* load a different device */
+	ret = fwupd_codec_from_json_string(FWUPD_CODEC(backend), json2, &error);
+	g_assert_no_error(error);
+	g_assert(ret);
+	g_assert_cmpint(added_cnt, ==, 2);
+	g_assert_cmpint(changed_cnt, ==, 1);
+	g_assert_cmpint(removed_cnt, ==, 1);
+	device = fu_backend_lookup_by_id(backend, "usb:FF:FF:06");
+	g_assert_no_error(error);
+	g_assert_nonnull(device);
+
+	/* save to string */
+	fu_device_add_flag(device, FWUPD_DEVICE_FLAG_EMULATION_TAG);
+	json3 = fwupd_codec_to_json_string(FWUPD_CODEC(backend), FWUPD_CODEC_FLAG_NONE, &error);
+	g_assert_no_error(error);
+	g_assert_nonnull(json3);
+	g_debug("%s", json3);
+	g_assert_cmpstr(json3, ==, json2);
 }
 
 static void
@@ -2327,28 +2573,28 @@ fu_strtoull_func(void)
 	guint64 val = 0;
 	g_autoptr(GError) error = NULL;
 
-	ret = fu_strtoull("123", &val, 123, 200, &error);
+	ret = fu_strtoull("123", &val, 123, 200, FU_INTEGER_BASE_AUTO, &error);
 	g_assert_no_error(error);
 	g_assert_true(ret);
 	g_assert_cmpint(val, ==, 123);
 
-	ret = fu_strtoull("123\n", &val, 0, 200, &error);
+	ret = fu_strtoull("123\n", &val, 0, 200, FU_INTEGER_BASE_AUTO, &error);
 	g_assert_no_error(error);
 	g_assert_true(ret);
 	g_assert_cmpint(val, ==, 123);
 
-	ret = fu_strtoull("0x123", &val, 0, 0x123, &error);
+	ret = fu_strtoull("0x123", &val, 0, 0x123, FU_INTEGER_BASE_AUTO, &error);
 	g_assert_no_error(error);
 	g_assert_true(ret);
 	g_assert_cmpint(val, ==, 0x123);
 
-	ret = fu_strtoull(NULL, &val, 0, G_MAXUINT32, NULL);
+	ret = fu_strtoull(NULL, &val, 0, G_MAXUINT32, FU_INTEGER_BASE_AUTO, NULL);
 	g_assert_false(ret);
-	ret = fu_strtoull("", &val, 120, 123, NULL);
+	ret = fu_strtoull("", &val, 120, 123, FU_INTEGER_BASE_AUTO, NULL);
 	g_assert_false(ret);
-	ret = fu_strtoull("124", &val, 120, 123, NULL);
+	ret = fu_strtoull("124", &val, 120, 123, FU_INTEGER_BASE_AUTO, NULL);
 	g_assert_false(ret);
-	ret = fu_strtoull("119", &val, 120, 123, NULL);
+	ret = fu_strtoull("119", &val, 120, 123, FU_INTEGER_BASE_AUTO, NULL);
 	g_assert_false(ret);
 }
 
@@ -2359,28 +2605,28 @@ fu_strtoll_func(void)
 	gint64 val = 0;
 	g_autoptr(GError) error = NULL;
 
-	ret = fu_strtoll("123", &val, 123, 200, &error);
+	ret = fu_strtoll("123", &val, 123, 200, FU_INTEGER_BASE_AUTO, &error);
 	g_assert_no_error(error);
 	g_assert_true(ret);
 	g_assert_cmpint(val, ==, 123);
 
-	ret = fu_strtoll("-123\n", &val, -123, 200, &error);
+	ret = fu_strtoll("-123\n", &val, -123, 200, FU_INTEGER_BASE_AUTO, &error);
 	g_assert_no_error(error);
 	g_assert_true(ret);
 	g_assert_cmpint(val, ==, -123);
 
-	ret = fu_strtoll("0x123", &val, 0, 0x123, &error);
+	ret = fu_strtoll("0x123", &val, 0, 0x123, FU_INTEGER_BASE_AUTO, &error);
 	g_assert_no_error(error);
 	g_assert_true(ret);
 	g_assert_cmpint(val, ==, 0x123);
 
-	ret = fu_strtoll(NULL, &val, 0, G_MAXINT32, NULL);
+	ret = fu_strtoll(NULL, &val, 0, G_MAXINT32, FU_INTEGER_BASE_AUTO, NULL);
 	g_assert_false(ret);
-	ret = fu_strtoll("", &val, 120, 123, NULL);
+	ret = fu_strtoll("", &val, 120, 123, FU_INTEGER_BASE_AUTO, NULL);
 	g_assert_false(ret);
-	ret = fu_strtoll("124", &val, 120, 123, NULL);
+	ret = fu_strtoll("124", &val, 120, 123, FU_INTEGER_BASE_AUTO, NULL);
 	g_assert_false(ret);
-	ret = fu_strtoll("-124", &val, -123, 123, NULL);
+	ret = fu_strtoll("-124", &val, -123, 123, FU_INTEGER_BASE_AUTO, NULL);
 	g_assert_false(ret);
 }
 
@@ -4357,6 +4603,7 @@ fu_firmware_builder_round_trip_func(void)
 	} map[] = {
 	    {FU_TYPE_CAB_FIRMWARE, "cab.builder.xml", "a708f47b1a46377f1ea420597641ffe9a40abd75"},
 	    {FU_TYPE_CAB_FIRMWARE, "cab-compressed.builder.xml", NULL}, /* not byte-identical */
+	    {FU_TYPE_ELF_FIRMWARE, "elf.builder.xml", "99ea60b8dd46085dcbf1ecd5e72b4cb73a3b6faa"},
 	    {FU_TYPE_DFUSE_FIRMWARE,
 	     "dfuse.builder.xml",
 	     "c1ff429f0e381c8fe8e1b2ee41a5a9a79e2f2ff7"},
@@ -5127,7 +5374,8 @@ fu_input_stream_chunkify_func(void)
 {
 	gboolean ret;
 	guint8 sum8 = 0;
-	guint32 crc32 = 0;
+	guint32 crc32 = 0xffffffff;
+	//	guint32 crc32 = 0x0;
 	g_autoptr(GByteArray) buf = g_byte_array_new();
 	g_autoptr(GInputStream) stream = NULL;
 	g_autoptr(GError) error = NULL;
@@ -5151,10 +5399,10 @@ fu_input_stream_chunkify_func(void)
 	checksum2 = g_compute_checksum_for_bytes(G_CHECKSUM_SHA1, blob);
 	g_assert_cmpstr(checksum, ==, checksum2);
 
-	ret = fu_input_stream_compute_crc32(stream, &crc32, 0xEDB88320, &error);
+	ret = fu_input_stream_compute_crc32(stream, FU_CRC32_KIND_STANDARD, &crc32, &error);
 	g_assert_no_error(error);
 	g_assert_true(ret);
-	g_assert_cmpint(crc32, ==, fu_crc32(buf->data, buf->len));
+	g_assert_cmpint(crc32, ==, fu_crc32(FU_CRC32_KIND_STANDARD, buf->data, buf->len));
 }
 
 static void
@@ -5499,6 +5747,7 @@ main(int argc, char **argv)
 
 	testdatadir = g_test_build_filename(G_TEST_DIST, "tests", NULL);
 	(void)g_setenv("FWUPD_DATADIR", testdatadir, TRUE);
+	(void)g_setenv("FWUPD_DATADIR_VENDOR_IDS", testdatadir, TRUE);
 	(void)g_setenv("FWUPD_LIBDIR_PKG", testdatadir, TRUE);
 	(void)g_setenv("FWUPD_SYSCONFDIR", testdatadir, TRUE);
 	(void)g_setenv("FWUPD_SYSFSFWDIR", testdatadir, TRUE);
@@ -5508,6 +5757,7 @@ main(int argc, char **argv)
 	(void)g_setenv("FWUPD_LOCALSTATEDIR", "/tmp/fwupd-self-test/var", TRUE);
 	(void)g_setenv("FWUPD_PROFILE", "1", TRUE);
 	(void)g_setenv("FWUPD_EFIVARS", "dummy", TRUE);
+	(void)g_setenv("CACHE_DIRECTORY", "/tmp/fwupd-self-test/cache", TRUE);
 
 	g_test_add_func("/fwupd/efi-lz77{decompressor}", fu_efi_lz77_decompressor_func);
 	g_test_add_func("/fwupd/input-stream", fu_input_stream_func);
@@ -5517,6 +5767,7 @@ main(int argc, char **argv)
 	g_test_add_func("/fwupd/struct", fu_plugin_struct_func);
 	g_test_add_func("/fwupd/struct{wrapped}", fu_plugin_struct_wrapped_func);
 	g_test_add_func("/fwupd/plugin{quirks-append}", fu_plugin_quirks_append_func);
+	g_test_add_func("/fwupd/quirks{vendor-ids}", fu_quirks_vendor_ids_func);
 	g_test_add_func("/fwupd/string{password-mask}", fu_strpassmask_func);
 	g_test_add_func("/fwupd/string{strsplit-stream}", fu_strsplit_stream_func);
 	g_test_add_func("/fwupd/lzma", fu_lzma_func);
@@ -5550,6 +5801,7 @@ main(int argc, char **argv)
 	g_test_add_func("/fwupd/plugin{quirks-performance}", fu_plugin_quirks_performance_func);
 	g_test_add_func("/fwupd/plugin{quirks-device}", fu_plugin_quirks_device_func);
 	g_test_add_func("/fwupd/backend", fu_backend_func);
+	g_test_add_func("/fwupd/backend{emulate}", fu_backend_emulate_func);
 	g_test_add_func("/fwupd/chunk", fu_chunk_func);
 	g_test_add_func("/fwupd/chunks", fu_chunk_array_func);
 	g_test_add_func("/fwupd/common{align-up}", fu_common_align_up_func);
@@ -5610,6 +5862,7 @@ main(int argc, char **argv)
 	g_test_add_func("/fwupd/archive{invalid}", fu_archive_invalid_func);
 	g_test_add_func("/fwupd/archive{cab}", fu_archive_cab_func);
 	g_test_add_func("/fwupd/device", fu_device_func);
+	g_test_add_func("/fwupd/device{event}", fu_device_event_func);
 	g_test_add_func("/fwupd/device{vfuncs}", fu_device_vfuncs_func);
 	g_test_add_func("/fwupd/device{instance-ids}", fu_device_instance_ids_func);
 	g_test_add_func("/fwupd/device{composite-id}", fu_device_composite_id_func);

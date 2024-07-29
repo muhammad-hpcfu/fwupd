@@ -21,10 +21,12 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include "fu-device-event-private.h"
 #include "fu-device-private.h"
 #include "fu-i2c-device.h"
 #include "fu-string.h"
 #include "fu-udev-device-private.h"
+#include "fu-usb-device-private.h"
 
 /**
  * FuUdevDevice:
@@ -47,11 +49,23 @@ typedef struct {
 	gchar *bind_id;
 	gchar *driver;
 	gchar *device_file;
+	gchar *devtype;
+	guint64 number;
 	FuIOChannel *io_channel;
+	FuIoChannelOpenFlag open_flags;
 	FuUdevDeviceFlags flags;
 } FuUdevDevicePrivate;
 
-G_DEFINE_TYPE_WITH_PRIVATE(FuUdevDevice, fu_udev_device, FU_TYPE_DEVICE)
+static void
+fu_udev_device_codec_iface_init(FwupdCodecInterface *iface);
+
+G_DEFINE_TYPE_EXTENDED(FuUdevDevice,
+		       fu_udev_device,
+		       FU_TYPE_DEVICE,
+		       0,
+		       G_ADD_PRIVATE(FuUdevDevice)
+			   G_IMPLEMENT_INTERFACE(FWUPD_TYPE_CODEC,
+						 fu_udev_device_codec_iface_init));
 
 enum {
 	PROP_0,
@@ -60,6 +74,7 @@ enum {
 	PROP_DRIVER,
 	PROP_DEVICE_FILE,
 	PROP_BIND_ID,
+	PROP_DEVTYPE,
 	PROP_LAST
 };
 
@@ -99,7 +114,7 @@ fu_udev_device_get_sysfs_attr_as_uint32(GUdevDevice *udev_device, const gchar *n
 	tmp = g_udev_device_get_sysfs_attr(udev_device, name);
 	if (tmp == NULL)
 		return 0x0;
-	if (!fu_strtoull(tmp, &tmp64, 0, G_MAXUINT32, &error_local)) {
+	if (!fu_strtoull(tmp, &tmp64, 0, G_MAXUINT32, FU_INTEGER_BASE_AUTO, &error_local)) {
 		g_warning("reading %s for %s was invalid: %s", name, tmp, error_local->message);
 		return 0x0;
 	}
@@ -116,7 +131,7 @@ fu_udev_device_get_sysfs_attr_as_uint16(GUdevDevice *udev_device, const gchar *n
 	tmp = g_udev_device_get_sysfs_attr(udev_device, name);
 	if (tmp == NULL)
 		return 0x0;
-	if (!fu_strtoull(tmp, &tmp64, 0, G_MAXUINT16, &error_local)) {
+	if (!fu_strtoull(tmp, &tmp64, 0, G_MAXUINT16, FU_INTEGER_BASE_AUTO, &error_local)) {
 		g_warning("reading %s for %s was invalid: %s", name, tmp, error_local->message);
 		return 0x0;
 	}
@@ -133,7 +148,7 @@ fu_udev_device_get_sysfs_attr_as_uint8(GUdevDevice *udev_device, const gchar *na
 	tmp = g_udev_device_get_sysfs_attr(udev_device, name);
 	if (tmp == NULL)
 		return 0x0;
-	if (!fu_strtoull(tmp, &tmp64, 0, G_MAXUINT8, &error_local)) {
+	if (!fu_strtoull(tmp, &tmp64, 0, G_MAXUINT8, FU_INTEGER_BASE_AUTO, &error_local)) {
 		g_warning("reading %s for %s was invalid: %s",
 			  name,
 			  g_udev_device_get_sysfs_path(udev_device),
@@ -148,26 +163,22 @@ fu_udev_device_get_sysfs_attr_as_uint8(GUdevDevice *udev_device, const gchar *na
 static void
 fu_udev_device_to_string(FuDevice *device, guint idt, GString *str)
 {
-#ifdef HAVE_GUDEV
 	FuUdevDevice *self = FU_UDEV_DEVICE(device);
 	FuUdevDevicePrivate *priv = GET_PRIVATE(self);
+	g_autofree gchar *open_flags = fu_io_channel_open_flag_to_string(priv->open_flags);
+
 	fwupd_codec_string_append_hex(str, idt, "Vendor", priv->vendor);
 	fwupd_codec_string_append_hex(str, idt, "Model", priv->model);
 	fwupd_codec_string_append_hex(str, idt, "SubsystemVendor", priv->subsystem_vendor);
 	fwupd_codec_string_append_hex(str, idt, "SubsystemModel", priv->subsystem_model);
 	fwupd_codec_string_append_hex(str, idt, "Class", priv->class);
 	fwupd_codec_string_append_hex(str, idt, "Revision", priv->revision);
+	fwupd_codec_string_append_hex(str, idt, "Number", priv->number);
 	fwupd_codec_string_append(str, idt, "Subsystem", priv->subsystem);
 	fwupd_codec_string_append(str, idt, "Driver", priv->driver);
 	fwupd_codec_string_append(str, idt, "BindId", priv->bind_id);
 	fwupd_codec_string_append(str, idt, "DeviceFile", priv->device_file);
-	if (priv->udev_device != NULL) {
-		fwupd_codec_string_append(str,
-					  idt,
-					  "SysfsPath",
-					  g_udev_device_get_sysfs_path(priv->udev_device));
-	}
-#endif
+	fwupd_codec_string_append(str, idt, "OpenFlags", open_flags);
 }
 
 static gboolean
@@ -179,23 +190,19 @@ fu_udev_device_ensure_bind_id(FuUdevDevice *self, GError **error)
 	if (priv->bind_id != NULL)
 		return TRUE;
 
-#ifdef HAVE_GUDEV
 	/* automatically set the bind ID from the subsystem */
 	if (g_strcmp0(priv->subsystem, "pci") == 0) {
-		priv->bind_id =
-		    g_strdup(g_udev_device_get_property(priv->udev_device, "PCI_SLOT_NAME"));
-		return TRUE;
+		priv->bind_id = fu_udev_device_read_property(self, "PCI_SLOT_NAME", error);
+		return priv->bind_id != NULL;
 	}
 	if (g_strcmp0(priv->subsystem, "hid") == 0) {
-		priv->bind_id = g_strdup(g_udev_device_get_property(priv->udev_device, "HID_PHYS"));
-		return TRUE;
+		priv->bind_id = fu_udev_device_read_property(self, "HID_PHYS", error);
+		return priv->bind_id != NULL;
 	}
 	if (g_strcmp0(priv->subsystem, "usb") == 0) {
-		priv->bind_id =
-		    g_path_get_basename(g_udev_device_get_sysfs_path(priv->udev_device));
+		priv->bind_id = g_path_get_basename(fu_udev_device_get_sysfs_path(self));
 		return TRUE;
 	}
-#endif
 
 	/* nothing found automatically */
 	g_set_error(error,
@@ -332,7 +339,7 @@ fu_udev_device_get_property_as_uint16(GUdevDevice *udev_device, const gchar *key
 	if (tmp == NULL)
 		return 0x0;
 	str = g_strdup_printf("0x%s", tmp);
-	if (!fu_strtoull(str, &value, 0x0, G_MAXUINT16, NULL))
+	if (!fu_strtoull(str, &value, 0x0, G_MAXUINT16, FU_INTEGER_BASE_AUTO, NULL))
 		return 0x0;
 	return (guint16)value;
 }
@@ -376,6 +383,123 @@ fu_udev_device_set_vendor_from_parent(FuUdevDevice *self)
 }
 #endif
 
+/**
+ * fu_udev_device_set_vendor:
+ * @self: a #FuUdevDevice
+ * @vendor: an ID
+ *
+ * Sets the vendor ID.
+ *
+ * Since: 2.0.0
+ **/
+void
+fu_udev_device_set_vendor(FuUdevDevice *self, guint16 vendor)
+{
+	FuUdevDevicePrivate *priv = GET_PRIVATE(self);
+	g_return_if_fail(FU_IS_UDEV_DEVICE(self));
+	priv->vendor = vendor;
+}
+
+/**
+ * fu_udev_device_set_model:
+ * @self: a #FuUdevDevice
+ * @model: an ID
+ *
+ * Sets the model ID.
+ *
+ * Since: 2.0.0
+ **/
+void
+fu_udev_device_set_model(FuUdevDevice *self, guint16 model)
+{
+	FuUdevDevicePrivate *priv = GET_PRIVATE(self);
+	g_return_if_fail(FU_IS_UDEV_DEVICE(self));
+	priv->model = model;
+}
+
+static void
+fu_udev_device_set_subsystem_vendor(FuUdevDevice *self, guint16 subsystem_vendor)
+{
+	FuUdevDevicePrivate *priv = GET_PRIVATE(self);
+	g_return_if_fail(FU_IS_UDEV_DEVICE(self));
+	priv->subsystem_vendor = subsystem_vendor;
+}
+
+static void
+fu_udev_device_set_subsystem_model(FuUdevDevice *self, guint16 subsystem_model)
+{
+	FuUdevDevicePrivate *priv = GET_PRIVATE(self);
+	g_return_if_fail(FU_IS_UDEV_DEVICE(self));
+	priv->subsystem_model = subsystem_model;
+}
+
+static void
+fu_udev_device_set_cls(FuUdevDevice *self, guint32 class)
+{
+	FuUdevDevicePrivate *priv = GET_PRIVATE(self);
+	g_return_if_fail(FU_IS_UDEV_DEVICE(self));
+	priv->class = class;
+}
+
+static void
+fu_udev_device_set_revision(FuUdevDevice *self, guint8 revision)
+{
+	FuUdevDevicePrivate *priv = GET_PRIVATE(self);
+	g_return_if_fail(FU_IS_UDEV_DEVICE(self));
+	priv->revision = revision;
+}
+
+static void
+fu_udev_device_set_number(FuUdevDevice *self, guint64 number)
+{
+	FuUdevDevicePrivate *priv = GET_PRIVATE(self);
+	g_return_if_fail(FU_IS_UDEV_DEVICE(self));
+	priv->number = number;
+}
+
+static void
+fu_udev_device_set_devtype(FuUdevDevice *self, const gchar *devtype)
+{
+	FuUdevDevicePrivate *priv = GET_PRIVATE(self);
+
+	/* not changed */
+	if (g_strcmp0(priv->devtype, devtype) == 0)
+		return;
+
+	g_free(priv->devtype);
+	priv->devtype = g_strdup(devtype);
+	g_object_notify(G_OBJECT(self), "devtype");
+}
+
+/* private */
+gboolean
+fu_udev_device_parse_number(FuUdevDevice *self, GError **error)
+{
+	FuUdevDevicePrivate *priv = GET_PRIVATE(self);
+	g_autoptr(GString) path = g_string_new(fu_udev_device_get_sysfs_path(self));
+
+	if (path->len == 0)
+		return TRUE;
+	for (guint i = path->len - 1; i > 0; i--) {
+		if (!g_ascii_isdigit(path->str[i])) {
+			g_string_erase(path, 0, i + 1);
+			break;
+		}
+	}
+	if (path->len > 0) {
+		if (!fu_strtoull(path->str,
+				 &priv->number,
+				 0x0,
+				 G_MAXUINT64,
+				 FU_INTEGER_BASE_AUTO,
+				 error))
+			return FALSE;
+	}
+
+	/* success */
+	return TRUE;
+}
+
 static gboolean
 fu_udev_device_probe(FuDevice *device, GError **error)
 {
@@ -406,19 +530,32 @@ fu_udev_device_probe(FuDevice *device, GError **error)
 		if (tmp != NULL) {
 			g_auto(GStrv) split = g_strsplit(tmp, ":", -1);
 			if (g_strv_length(split) == 3) {
-				guint64 val = g_ascii_strtoull(split[1], NULL, 16);
-				if (val > G_MAXUINT16) {
-					g_warning("reading %s for %s overflowed",
+				guint64 val = 0;
+				g_autoptr(GError) error_local = NULL;
+
+				if (!fu_strtoull(split[1],
+						 &val,
+						 0,
+						 G_MAXUINT16,
+						 FU_INTEGER_BASE_16,
+						 &error_local)) {
+					g_warning("reading %s for %s failed: %s",
 						  split[1],
-						  g_udev_device_get_sysfs_path(priv->udev_device));
+						  g_udev_device_get_sysfs_path(priv->udev_device),
+						  error_local->message);
 				} else {
 					priv->vendor = val;
 				}
-				val = g_ascii_strtoull(split[2], NULL, 16);
-				if (val > G_MAXUINT32) {
-					g_warning("reading %s for %s overflowed",
+				if (!fu_strtoull(split[2],
+						 &val,
+						 0,
+						 G_MAXUINT16,
+						 FU_INTEGER_BASE_16,
+						 &error_local)) {
+					g_warning("reading %s for %s failed: %s",
 						  split[2],
-						  g_udev_device_get_sysfs_path(priv->udev_device));
+						  g_udev_device_get_sysfs_path(priv->udev_device),
+						  error_local->message);
 				} else {
 					priv->model = val;
 				}
@@ -474,6 +611,13 @@ fu_udev_device_probe(FuDevice *device, GError **error)
 			fu_device_set_vendor(device, tmp);
 	}
 
+	/* set number */
+	if (fu_udev_device_get_sysfs_path(self) != NULL) {
+		g_autoptr(GError) error_local = NULL;
+		if (!fu_udev_device_parse_number(self, &error_local))
+			g_debug("failed to convert udev number: %s", error_local->message);
+	}
+
 	/* try harder to find a vendor name the user will recognize */
 	if (priv->flags & FU_UDEV_DEVICE_FLAG_VENDOR_FROM_PARENT && udev_parent != NULL &&
 	    fu_device_get_vendor(device) == NULL) {
@@ -495,13 +639,15 @@ fu_udev_device_probe(FuDevice *device, GError **error)
 	/* set revision */
 	if (fu_device_get_version(device) == NULL &&
 	    fu_device_get_version_format(device) == FWUPD_VERSION_FORMAT_UNKNOWN) {
-		tmp = g_udev_device_get_property(priv->udev_device, "ID_REVISION");
-		if (tmp != NULL)
-			fu_device_set_version(device, tmp);
+		g_autofree gchar *prop_revision = NULL;
+		prop_revision = fu_udev_device_read_property(self, "ID_REVISION", NULL);
+		if (prop_revision != NULL)
+			fu_device_set_version(device, prop_revision);
 	}
 
 	/* set vendor ID */
-	subsystem = g_ascii_strup(g_udev_device_get_subsystem(priv->udev_device), -1);
+	if (priv->subsystem != NULL)
+		subsystem = g_ascii_strup(priv->subsystem, -1);
 	if (subsystem != NULL && priv->vendor != 0x0000) {
 		g_autofree gchar *vendor_id = NULL;
 		vendor_id = g_strdup_printf("%s:0x%04X", subsystem, (guint)priv->vendor);
@@ -581,11 +727,12 @@ fu_udev_device_probe(FuDevice *device, GError **error)
 	/* set serial */
 	if (!fu_device_has_internal_flag(device, FU_DEVICE_INTERNAL_FLAG_NO_SERIAL_NUMBER) &&
 	    fu_device_get_serial(device) == NULL) {
-		tmp = g_udev_device_get_property(priv->udev_device, "ID_SERIAL_SHORT");
-		if (tmp == NULL)
-			tmp = g_udev_device_get_property(priv->udev_device, "ID_SERIAL");
-		if (tmp != NULL)
-			fu_device_set_serial(device, tmp);
+		g_autofree gchar *prop_serial =
+		    fu_udev_device_read_property(self, "ID_SERIAL_SHORT", NULL);
+		if (prop_serial == NULL)
+			prop_serial = fu_udev_device_read_property(self, "ID_SERIAL", NULL);
+		if (prop_serial != NULL)
+			fu_device_set_serial(device, prop_serial);
 	}
 
 	/* add device class */
@@ -623,19 +770,6 @@ fu_udev_device_probe(FuDevice *device, GError **error)
 						 NULL,
 						 subsystem,
 						 "DRIVER",
-						 NULL);
-
-		/* add the modalias */
-		fu_device_add_instance_strsafe(
-		    device,
-		    "MODALIAS",
-		    g_udev_device_get_property(priv->udev_device, "MODALIAS"));
-		fu_device_build_instance_id_full(device,
-						 FU_DEVICE_INSTANCE_FLAG_GENERIC |
-						     FU_DEVICE_INSTANCE_FLAG_QUIRKS,
-						 NULL,
-						 subsystem,
-						 "MODALIAS",
 						 NULL);
 	}
 
@@ -726,6 +860,7 @@ fu_udev_device_set_dev(FuUdevDevice *self, GUdevDevice *udev_device)
 	fu_udev_device_set_subsystem(self, g_udev_device_get_subsystem(priv->udev_device));
 	fu_udev_device_set_driver(self, g_udev_device_get_driver(priv->udev_device));
 	fu_udev_device_set_device_file(self, g_udev_device_get_device_file(priv->udev_device));
+	fu_udev_device_set_devtype(self, g_udev_device_get_devtype(priv->udev_device));
 
 	/* so we can display something sensible for unclaimed devices */
 	fu_device_set_backend_id(FU_DEVICE(self), g_udev_device_get_sysfs_path(priv->udev_device));
@@ -754,7 +889,7 @@ fu_udev_device_set_dev(FuUdevDevice *self, GUdevDevice *udev_device)
 }
 
 /**
- * fu_udev_device_get_slot_depth:
+ * fu_udev_device_get_subsystem_depth:
  * @self: a #FuUdevDevice
  * @subsystem: a subsystem
  *
@@ -762,25 +897,23 @@ fu_udev_device_set_dev(FuUdevDevice *self, GUdevDevice *udev_device)
  *
  * Returns: unsigned integer
  *
- * Since: 1.2.4
+ * Since: 2.0.0
  **/
 guint
-fu_udev_device_get_slot_depth(FuUdevDevice *self, const gchar *subsystem)
+fu_udev_device_get_subsystem_depth(FuUdevDevice *self, const gchar *subsystem)
 {
-#ifdef HAVE_GUDEV
-	GUdevDevice *udev_device = fu_udev_device_get_dev(FU_UDEV_DEVICE(self));
-	g_autoptr(GUdevDevice) device_tmp = NULL;
+	g_autoptr(FuDevice) device_tmp = NULL;
 
-	device_tmp = g_udev_device_get_parent_with_subsystem(udev_device, subsystem, NULL);
+	device_tmp = fu_device_get_backend_parent_with_kind(FU_DEVICE(self), subsystem, NULL);
 	if (device_tmp == NULL)
 		return 0;
-	for (guint i = 0; i < 0xff; i++) {
-		g_autoptr(GUdevDevice) parent = g_udev_device_get_parent(device_tmp);
+	for (guint i = 0;; i++) {
+		g_autoptr(FuDevice) parent =
+		    fu_device_get_backend_parent(FU_DEVICE(device_tmp), NULL);
 		if (parent == NULL)
 			return i;
 		g_set_object(&device_tmp, parent);
 	}
-#endif
 	return 0;
 }
 
@@ -798,22 +931,22 @@ fu_udev_device_probe_complete(FuDevice *device)
 static gboolean
 fu_udev_device_unbind_driver(FuDevice *device, GError **error)
 {
-#ifdef HAVE_GUDEV
 	FuUdevDevice *self = FU_UDEV_DEVICE(device);
 	FuUdevDevicePrivate *priv = GET_PRIVATE(self);
 	g_autofree gchar *fn = NULL;
 	g_autoptr(GFile) file = NULL;
 	g_autoptr(GOutputStream) stream = NULL;
 
+	/* emulated */
+	if (fu_device_has_flag(FU_DEVICE(self), FWUPD_DEVICE_FLAG_EMULATED))
+		return TRUE;
+
 	/* is already unbound */
-	if (priv->udev_device == NULL) {
+	if (fu_udev_device_get_sysfs_path(self) == NULL) {
 		g_set_error_literal(error, FWUPD_ERROR, FWUPD_ERROR_NOT_FOUND, "not initialized");
 		return FALSE;
 	}
-	fn = g_build_filename(g_udev_device_get_sysfs_path(priv->udev_device),
-			      "driver",
-			      "unbind",
-			      NULL);
+	fn = g_build_filename(fu_udev_device_get_sysfs_path(self), "driver", "unbind", NULL);
 	if (!g_file_test(fn, G_FILE_TEST_EXISTS))
 		return TRUE;
 
@@ -831,13 +964,6 @@ fu_udev_device_unbind_driver(FuDevice *device, GError **error)
 					 NULL,
 					 NULL,
 					 error);
-#else
-	g_set_error_literal(error,
-			    FWUPD_ERROR,
-			    FWUPD_ERROR_NOT_SUPPORTED,
-			    "driver unbinding not supported");
-	return FALSE;
-#endif
 }
 
 static gboolean
@@ -846,13 +972,16 @@ fu_udev_device_bind_driver(FuDevice *device,
 			   const gchar *driver,
 			   GError **error)
 {
-#ifdef HAVE_GUDEV
 	FuUdevDevice *self = FU_UDEV_DEVICE(device);
 	FuUdevDevicePrivate *priv = GET_PRIVATE(self);
 	g_autofree gchar *driver_safe = g_strdup(driver);
 	g_autofree gchar *fn = NULL;
 	g_autoptr(GFile) file = NULL;
 	g_autoptr(GOutputStream) stream = NULL;
+
+	/* emulated */
+	if (fu_device_has_flag(FU_DEVICE(self), FWUPD_DEVICE_FLAG_EMULATED))
+		return TRUE;
 
 	/* copy the logic from modprobe */
 	g_strdelimit(driver_safe, "-", '_');
@@ -894,13 +1023,14 @@ fu_udev_device_bind_driver(FuDevice *device,
 					 NULL,
 					 NULL,
 					 error);
-#else
-	g_set_error_literal(error,
-			    FWUPD_ERROR,
-			    FWUPD_ERROR_NOT_SUPPORTED,
-			    "driver binding not supported on Windows");
-	return FALSE;
-#endif
+}
+
+static FuIoChannelOpenFlag
+fu_udev_device_get_open_flags(FuUdevDevice *self)
+{
+	FuUdevDevicePrivate *priv = GET_PRIVATE(self);
+	g_return_val_if_fail(FU_IS_UDEV_DEVICE(self), 0);
+	return priv->open_flags;
 }
 
 static void
@@ -909,30 +1039,41 @@ fu_udev_device_incorporate(FuDevice *self, FuDevice *donor)
 	FuUdevDevice *uself = FU_UDEV_DEVICE(self);
 	FuUdevDevice *udonor = FU_UDEV_DEVICE(donor);
 	FuUdevDevicePrivate *priv = GET_PRIVATE(uself);
-	FuUdevDevicePrivate *priv_donor = GET_PRIVATE(udonor);
 
 	g_return_if_fail(FU_IS_UDEV_DEVICE(self));
 	g_return_if_fail(FU_IS_UDEV_DEVICE(donor));
 
 	fu_udev_device_set_dev(uself, fu_udev_device_get_dev(udonor));
-	if (priv->device_file == NULL) {
-		fu_udev_device_set_subsystem(uself, fu_udev_device_get_subsystem(udonor));
-		fu_udev_device_set_bind_id(uself, fu_udev_device_get_bind_id(udonor));
+	if (priv->device_file == NULL)
 		fu_udev_device_set_device_file(uself, fu_udev_device_get_device_file(udonor));
+	if (priv->subsystem == NULL)
+		fu_udev_device_set_subsystem(uself, fu_udev_device_get_subsystem(udonor));
+	if (priv->bind_id == NULL)
+		fu_udev_device_set_bind_id(uself, fu_udev_device_get_bind_id(udonor));
+	if (priv->driver == NULL)
 		fu_udev_device_set_driver(uself, fu_udev_device_get_driver(udonor));
+	if (priv->devtype == NULL)
+		fu_udev_device_set_devtype(uself, fu_udev_device_get_devtype(udonor));
+	if (priv->vendor == 0x0)
+		fu_udev_device_set_vendor(uself, fu_udev_device_get_vendor(udonor));
+	if (priv->model == 0x0)
+		fu_udev_device_set_model(uself, fu_udev_device_get_model(udonor));
+	if (priv->number == 0x0)
+		fu_udev_device_set_number(uself, fu_udev_device_get_number(udonor));
+	if (priv->subsystem_vendor == 0x0) {
+		fu_udev_device_set_subsystem_vendor(uself,
+						    fu_udev_device_get_subsystem_vendor(udonor));
 	}
-	if (priv->vendor == 0x0 && priv_donor->vendor != 0x0)
-		priv->vendor = priv_donor->vendor;
-	if (priv->model == 0x0 && priv_donor->model != 0x0)
-		priv->model = priv_donor->model;
-	if (priv->subsystem_vendor == 0x0 && priv_donor->subsystem_vendor != 0x0)
-		priv->subsystem_vendor = priv_donor->subsystem_vendor;
-	if (priv->subsystem_model == 0x0 && priv_donor->subsystem_model != 0x0)
-		priv->subsystem_model = priv_donor->subsystem_model;
-	if (priv->revision == 0x0 && priv_donor->revision != 0x0)
-		priv->revision = priv_donor->revision;
-	if (priv->io_channel == NULL && priv_donor->io_channel != 0x0)
-		priv->io_channel = g_object_ref(priv_donor->io_channel);
+	if (priv->open_flags == FU_IO_CHANNEL_OPEN_FLAG_NONE)
+		priv->open_flags = fu_udev_device_get_open_flags(udonor);
+	if (priv->subsystem_model == 0x0) {
+		fu_udev_device_set_subsystem_model(uself,
+						   fu_udev_device_get_subsystem_model(udonor));
+	}
+	if (priv->class == 0x0)
+		fu_udev_device_set_cls(uself, fu_udev_device_get_cls(udonor));
+	if (priv->revision == 0x0)
+		fu_udev_device_set_revision(uself, fu_udev_device_get_revision(udonor));
 }
 
 /**
@@ -1051,13 +1192,8 @@ fu_udev_device_get_device_file(FuUdevDevice *self)
 const gchar *
 fu_udev_device_get_sysfs_path(FuUdevDevice *self)
 {
-#ifdef HAVE_GUDEV
-	FuUdevDevicePrivate *priv = GET_PRIVATE(self);
 	g_return_val_if_fail(FU_IS_UDEV_DEVICE(self), NULL);
-	if (priv->udev_device != NULL)
-		return g_udev_device_get_sysfs_path(priv->udev_device);
-#endif
-	return NULL;
+	return fu_device_get_backend_id(FU_DEVICE(self));
 }
 
 /**
@@ -1066,32 +1202,16 @@ fu_udev_device_get_sysfs_path(FuUdevDevice *self)
  *
  * Gets the device number, if any.
  *
- * Returns: integer, 0 if the data is unavailable, or %G_MAXUINT64 if the
- * feature is not available
+ * Returns: integer, 0 if the data is unavailable.
  *
  * Since: 1.5.0
  **/
 guint64
 fu_udev_device_get_number(FuUdevDevice *self)
 {
-#ifdef HAVE_GUDEV
 	FuUdevDevicePrivate *priv = GET_PRIVATE(self);
 	g_return_val_if_fail(FU_IS_UDEV_DEVICE(self), 0);
-	if (priv->udev_device != NULL) {
-		guint64 tmp = 0;
-		g_autoptr(GError) error_local = NULL;
-		if (!fu_strtoull(g_udev_device_get_number(priv->udev_device),
-				 &tmp,
-				 0x0,
-				 G_MAXUINT64,
-				 &error_local)) {
-			g_warning("failed to convert udev number: %s", error_local->message);
-			return G_MAXUINT64;
-		}
-		return tmp;
-	}
-#endif
-	return G_MAXUINT64;
+	return priv->number;
 }
 
 /**
@@ -1239,43 +1359,11 @@ fu_udev_device_get_parent_subsystems(FuUdevDevice *self)
 		if (g_udev_device_get_subsystem(parent) != NULL) {
 			g_string_append_printf(str, "%s,", g_udev_device_get_subsystem(parent));
 		}
-		g_set_object(&udev_device, g_steal_pointer(&parent));
+		g_set_object(&udev_device, parent);
 	}
 	if (str->len > 0)
 		g_string_truncate(str, str->len - 1);
 	return g_string_free(str, FALSE);
-}
-
-static gboolean
-fu_udev_device_match_subsystem_devtype(GUdevDevice *udev_device,
-				       const gchar *subsystem,
-				       const gchar *devtype)
-{
-	if (subsystem != NULL) {
-		if (g_strcmp0(g_udev_device_get_subsystem(udev_device), subsystem) != 0)
-			return FALSE;
-	}
-	if (devtype != NULL) {
-		if (g_strcmp0(g_udev_device_get_devtype(udev_device), devtype) != 0)
-			return FALSE;
-	}
-	return TRUE;
-}
-
-static GUdevDevice *
-fu_udev_device_get_parent_with_subsystem_devtype(GUdevDevice *udev_device,
-						 const gchar *subsystem,
-						 const gchar *devtype)
-{
-	g_autoptr(GUdevDevice) udev_device_tmp = g_object_ref(udev_device);
-	while (udev_device_tmp != NULL) {
-		g_autoptr(GUdevDevice) parent = NULL;
-		if (fu_udev_device_match_subsystem_devtype(udev_device_tmp, subsystem, devtype))
-			return g_object_ref(udev_device_tmp);
-		parent = g_udev_device_get_parent(udev_device_tmp);
-		g_set_object(&udev_device_tmp, parent);
-	}
-	return NULL;
 }
 #endif
 
@@ -1319,14 +1407,15 @@ fu_udev_device_set_physical_id(FuUdevDevice *self, const gchar *subsystems, GErr
 	/* look for each subsystem[:devtype] in turn */
 	split = g_strsplit(subsystems, ",", -1);
 	for (guint i = 0; split[i] != NULL; i++) {
-		g_auto(GStrv) subsys_devtype = g_strsplit(split[i], ":", 2);
+		g_autoptr(FuUdevDevice) device_parent = NULL;
 
 		/* matching on devtype is optional */
-		udev_device = fu_udev_device_get_parent_with_subsystem_devtype(priv->udev_device,
-									       subsys_devtype[0],
-									       subsys_devtype[1]);
-		if (udev_device != NULL) {
+		device_parent = FU_UDEV_DEVICE(
+		    fu_device_get_backend_parent_with_kind(FU_DEVICE(self), split[i], NULL));
+		if (device_parent != NULL) {
+			g_auto(GStrv) subsys_devtype = g_strsplit(split[i], ":", 2);
 			subsystem = g_strdup(subsys_devtype[0]);
+			udev_device = g_object_ref(fu_udev_device_get_dev(device_parent));
 			break;
 		}
 	}
@@ -1526,7 +1615,7 @@ fu_udev_device_set_io_channel(FuUdevDevice *self, FuIOChannel *io_channel)
 /**
  * fu_udev_device_remove_flag:
  * @self: a #FuUdevDevice
- * @flag: udev device flag, e.g. %FU_UDEV_DEVICE_FLAG_OPEN_READ
+ * @flag: udev device flag, e.g. %FU_IO_CHANNEL_OPEN_FLAG_READ
  *
  * Removes a parameters flag.
  *
@@ -1543,11 +1632,11 @@ fu_udev_device_remove_flag(FuUdevDevice *self, FuUdevDeviceFlags flag)
 /**
  * fu_udev_device_add_flag:
  * @self: a #FuUdevDevice
- * @flag: udev device flag, e.g. %FU_UDEV_DEVICE_FLAG_OPEN_READ
+ * @flag: udev device flag, e.g. %FU_IO_CHANNEL_OPEN_FLAG_READ
  *
  * Sets the parameters to use when opening the device.
  *
- * For example %FU_UDEV_DEVICE_FLAG_OPEN_READ means that fu_device_open()
+ * For example %FU_IO_CHANNEL_OPEN_FLAG_READ means that fu_device_open()
  * would use `O_RDONLY` rather than `O_RDWR` which is the default.
  *
  * Since: 2.0.0
@@ -1562,17 +1651,47 @@ fu_udev_device_add_flag(FuUdevDevice *self, FuUdevDeviceFlags flag)
 	if (priv->flags & flag)
 		return;
 	priv->flags |= flag;
+}
 
-#ifdef HAVE_GUDEV
-	/* overwrite */
-	if (flag & FU_UDEV_DEVICE_FLAG_USE_CONFIG) {
-		g_free(priv->device_file);
-		priv->device_file =
-		    g_build_filename(g_udev_device_get_sysfs_path(priv->udev_device),
-				     "config",
-				     NULL);
-	}
-#endif
+/**
+ * fu_udev_device_remove_open_flag:
+ * @self: a #FuUdevDevice
+ * @flag: udev device flag, e.g. %FU_IO_CHANNEL_OPEN_FLAG_READ
+ *
+ * Removes a open flag.
+ *
+ * Since: 2.0.0
+ **/
+void
+fu_udev_device_remove_open_flag(FuUdevDevice *self, FuIoChannelOpenFlag flag)
+{
+	FuUdevDevicePrivate *priv = GET_PRIVATE(self);
+	g_return_if_fail(FU_IS_UDEV_DEVICE(self));
+	priv->open_flags &= ~flag;
+}
+
+/**
+ * fu_udev_device_add_open_flag:
+ * @self: a #FuUdevDevice
+ * @flag: udev device flag, e.g. %FU_IO_CHANNEL_OPEN_FLAG_READ
+ *
+ * Sets the parameters to use when opening the device.
+ *
+ * For example %FU_IO_CHANNEL_OPEN_FLAG_READ means that fu_device_open()
+ * would use `O_RDONLY` rather than `O_RDWR` which is the default.
+ *
+ * Since: 2.0.0
+ **/
+void
+fu_udev_device_add_open_flag(FuUdevDevice *self, FuIoChannelOpenFlag flag)
+{
+	FuUdevDevicePrivate *priv = GET_PRIVATE(self);
+	g_return_if_fail(FU_IS_UDEV_DEVICE(self));
+
+	/* already set */
+	if (priv->open_flags & flag)
+		return;
+	priv->open_flags |= flag;
 }
 
 static gboolean
@@ -1580,57 +1699,31 @@ fu_udev_device_open(FuDevice *device, GError **error)
 {
 	FuUdevDevice *self = FU_UDEV_DEVICE(device);
 	FuUdevDevicePrivate *priv = GET_PRIVATE(self);
-	gint fd;
+
+	/* emulated */
+	if (fu_device_has_flag(FU_DEVICE(self), FWUPD_DEVICE_FLAG_EMULATED))
+		return TRUE;
 
 	/* old versions of fwupd used to start with OPEN_READ|OPEN_WRITE and then plugins
 	 * could add more flags, or set the flags back to NONE -- detect and fixup */
-	if (priv->device_file != NULL && priv->flags == FU_UDEV_DEVICE_FLAG_NONE) {
+	if (priv->device_file != NULL && priv->open_flags == FU_IO_CHANNEL_OPEN_FLAG_NONE) {
 #ifndef SUPPORTED_BUILD
-		g_critical("%s [%s] forgot to call fu_udev_device_add_flag() with OPEN_READ and/or "
-			   "OPEN_WRITE",
-			   fu_device_get_name(device),
-			   fu_device_get_id(device));
+		g_critical(
+		    "%s [%s] forgot to call fu_udev_device_add_open_flag() with OPEN_READ and/or "
+		    "OPEN_WRITE",
+		    fu_device_get_name(device),
+		    fu_device_get_id(device));
 #endif
-		fu_udev_device_add_flag(FU_UDEV_DEVICE(self), FU_UDEV_DEVICE_FLAG_OPEN_READ);
-		fu_udev_device_add_flag(FU_UDEV_DEVICE(self), FU_UDEV_DEVICE_FLAG_OPEN_WRITE);
+		fu_udev_device_add_open_flag(FU_UDEV_DEVICE(self), FU_IO_CHANNEL_OPEN_FLAG_READ);
+		fu_udev_device_add_open_flag(FU_UDEV_DEVICE(self), FU_IO_CHANNEL_OPEN_FLAG_WRITE);
 	}
 
 	/* open device */
-	if (priv->device_file != NULL && priv->flags != FU_UDEV_DEVICE_FLAG_NONE) {
-		gint flags;
+	if (priv->device_file != NULL) {
 		g_autoptr(FuIOChannel) io_channel = NULL;
-		if (priv->flags & FU_UDEV_DEVICE_FLAG_OPEN_READ &&
-		    priv->flags & FU_UDEV_DEVICE_FLAG_OPEN_WRITE) {
-			flags = O_RDWR;
-		} else if (priv->flags & FU_UDEV_DEVICE_FLAG_OPEN_WRITE) {
-			flags = O_WRONLY;
-		} else {
-			flags = O_RDONLY;
-		}
-#ifdef O_NONBLOCK
-		if (priv->flags & FU_UDEV_DEVICE_FLAG_OPEN_NONBLOCK)
-			flags |= O_NONBLOCK;
-#endif
-#ifdef O_SYNC
-		if (priv->flags & FU_UDEV_DEVICE_FLAG_OPEN_SYNC)
-			flags |= O_SYNC;
-#endif
-		fd = g_open(priv->device_file, flags, 0);
-		if (fd < 0) {
-			g_set_error(error,
-				    G_IO_ERROR, /* nocheck */
-#ifdef HAVE_ERRNO_H
-				    g_io_error_from_errno(errno),
-#else
-				    G_IO_ERROR_FAILED, /* nocheck */
-#endif
-				    "failed to open %s: %s",
-				    priv->device_file,
-				    g_strerror(errno));
-			fwupd_error_convert(error);
+		io_channel = fu_io_channel_new_file(priv->device_file, priv->open_flags, error);
+		if (io_channel == NULL)
 			return FALSE;
-		}
-		io_channel = fu_io_channel_unix_new(fd);
 		g_set_object(&priv->io_channel, io_channel);
 	}
 
@@ -1677,10 +1770,18 @@ fu_udev_device_close(FuDevice *device, GError **error)
 {
 	FuUdevDevice *self = FU_UDEV_DEVICE(device);
 	FuUdevDevicePrivate *priv = GET_PRIVATE(self);
+
+	/* emulated */
+	if (fu_device_has_flag(FU_DEVICE(self), FWUPD_DEVICE_FLAG_EMULATED))
+		return TRUE;
+
+	/* optional */
 	if (priv->io_channel != NULL) {
 		if (!fu_io_channel_shutdown(priv->io_channel, error))
 			return FALSE;
 	}
+
+	/* success */
 	return TRUE;
 }
 
@@ -1689,33 +1790,71 @@ fu_udev_device_close(FuDevice *device, GError **error)
  * @self: a #FuUdevDevice
  * @request: request number
  * @buf: a buffer to use, which *must* be large enough for the request
+ * @bufsz: the size of @buf
  * @rc: (out) (nullable): the raw return value from the ioctl
- * @timeout: timeout in ms for the retry action, see %FU_UDEV_DEVICE_FLAG_IOCTL_RETRY
+ * @timeout: timeout in ms for the retry action, see %FU_UDEV_DEVICE_IOCTL_FLAG_RETRY
+ * @flags: some #FuUdevDeviceIoctlFlags, e.g. %FU_UDEV_DEVICE_IOCTL_FLAG_RETRY
  * @error: (nullable): optional return location for an error
  *
  * Control a device using a low-level request.
  *
+ * NOTE: In version 2.0.0 the @bufsz parameter was added -- which isn't required to perform the
+ * ioctl, but *is* required to accurately track and emulate the device buffer.
+ *
  * Returns: %TRUE for success
  *
- * Since: 1.8.2
+ * Since: 2.0.0
  **/
 gboolean
 fu_udev_device_ioctl(FuUdevDevice *self,
 		     gulong request,
 		     guint8 *buf,
+		     gsize bufsz,
 		     gint *rc,
 		     guint timeout,
+		     FuUdevDeviceIoctlFlags flags,
 		     GError **error)
 {
 #ifdef HAVE_IOCTL_H
 	FuUdevDevicePrivate *priv = GET_PRIVATE(self);
 	gint rc_tmp;
 	g_autoptr(GTimer) timer = g_timer_new();
+	FuDeviceEvent *event = NULL;
+	g_autofree gchar *event_id = NULL;
 
 	g_return_val_if_fail(FU_IS_UDEV_DEVICE(self), FALSE);
 	g_return_val_if_fail(request != 0x0, FALSE);
 	g_return_val_if_fail(buf != NULL, FALSE);
 	g_return_val_if_fail(error == NULL || *error == NULL, FALSE);
+
+	/* emulated */
+	if (fu_device_has_flag(FU_DEVICE(self), FWUPD_DEVICE_FLAG_EMULATED) ||
+	    fu_context_has_flag(fu_device_get_context(FU_DEVICE(self)),
+				FU_CONTEXT_FLAG_SAVE_EVENTS)) {
+		g_autofree gchar *buf_base64 = g_base64_encode(buf, bufsz);
+		event_id = g_strdup_printf("Ioctl:"
+					   "Request=0x%04x,"
+					   "Data=%s,"
+					   "Length=0x%x",
+					   (guint)request,
+					   buf_base64,
+					   (guint)bufsz);
+	}
+
+	/* emulated */
+	if (fu_device_has_flag(FU_DEVICE(self), FWUPD_DEVICE_FLAG_EMULATED)) {
+		event = fu_device_load_event(FU_DEVICE(self), event_id, error);
+		if (event == NULL)
+			return FALSE;
+		return fu_device_event_copy_data(event, "Data", buf, bufsz, NULL, error);
+	}
+
+	/* save */
+	if (fu_context_has_flag(fu_device_get_context(FU_DEVICE(self)),
+				FU_CONTEXT_FLAG_SAVE_EVENTS)) {
+		event = fu_device_save_event(FU_DEVICE(self), event_id);
+		fu_device_event_set_data(event, "Data", buf, bufsz);
+	}
 
 	/* not open! */
 	if (priv->io_channel == NULL) {
@@ -1733,8 +1872,7 @@ fu_udev_device_ioctl(FuUdevDevice *self,
 		rc_tmp = ioctl(fu_io_channel_unix_get_fd(priv->io_channel), request, buf);
 		if (rc_tmp >= 0)
 			break;
-	} while ((priv->flags & FU_UDEV_DEVICE_FLAG_IOCTL_RETRY) &&
-		 (errno == EINTR || errno == EAGAIN) &&
+	} while ((flags & FU_UDEV_DEVICE_IOCTL_FLAG_RETRY) && (errno == EINTR || errno == EAGAIN) &&
 		 g_timer_elapsed(timer, NULL) < timeout * 1000.f);
 	if (rc != NULL)
 		*rc = rc_tmp;
@@ -1765,6 +1903,12 @@ fu_udev_device_ioctl(FuUdevDevice *self,
 #endif
 		return FALSE;
 	}
+
+	/* save response */
+	if (event != NULL)
+		fu_device_event_set_data(event, "DataOut", buf, bufsz);
+
+	/* success */
 	return TRUE;
 #else
 	g_set_error(error,
@@ -1793,10 +1937,36 @@ gboolean
 fu_udev_device_pread(FuUdevDevice *self, goffset port, guint8 *buf, gsize bufsz, GError **error)
 {
 	FuUdevDevicePrivate *priv = GET_PRIVATE(self);
+	FuDeviceEvent *event = NULL;
+	g_autofree gchar *event_id = NULL;
 
 	g_return_val_if_fail(FU_IS_UDEV_DEVICE(self), FALSE);
 	g_return_val_if_fail(buf != NULL, FALSE);
 	g_return_val_if_fail(error == NULL || *error == NULL, FALSE);
+
+	/* emulated */
+	if (fu_device_has_flag(FU_DEVICE(self), FWUPD_DEVICE_FLAG_EMULATED) ||
+	    fu_context_has_flag(fu_device_get_context(FU_DEVICE(self)),
+				FU_CONTEXT_FLAG_SAVE_EVENTS)) {
+		g_autofree gchar *buf_base64 = g_base64_encode(buf, bufsz);
+		event_id = g_strdup_printf("Pread:"
+					   "Port=0x%x,"
+					   "Length=0x%x",
+					   (guint)port,
+					   (guint)bufsz);
+	}
+
+	/* emulated */
+	if (fu_device_has_flag(FU_DEVICE(self), FWUPD_DEVICE_FLAG_EMULATED)) {
+		event = fu_device_load_event(FU_DEVICE(self), event_id, error);
+		if (event == NULL)
+			return FALSE;
+		return fu_device_event_copy_data(event, "Data", buf, bufsz, NULL, error);
+	}
+
+	/* save */
+	if (event_id != NULL)
+		event = fu_device_save_event(FU_DEVICE(self), event_id);
 
 	/* not open! */
 	if (priv->io_channel == NULL) {
@@ -1824,6 +1994,10 @@ fu_udev_device_pread(FuUdevDevice *self, goffset port, guint8 *buf, gsize bufsz,
 		fwupd_error_convert(error);
 		return FALSE;
 	}
+
+	/* save response */
+	if (event != NULL)
+		fu_device_event_set_data(event, "Data", buf, bufsz);
 	return TRUE;
 #else
 	g_set_error_literal(error,
@@ -1853,6 +2027,10 @@ fu_udev_device_seek(FuUdevDevice *self, goffset offset, GError **error)
 
 	g_return_val_if_fail(FU_IS_UDEV_DEVICE(self), FALSE);
 	g_return_val_if_fail(error == NULL || *error == NULL, FALSE);
+
+	/* emulated */
+	if (fu_device_has_flag(FU_DEVICE(self), FWUPD_DEVICE_FLAG_EMULATED))
+		return TRUE;
 
 	/* not open! */
 	if (priv->io_channel == NULL) {
@@ -1916,6 +2094,10 @@ fu_udev_device_pwrite(FuUdevDevice *self,
 	g_return_val_if_fail(FU_IS_UDEV_DEVICE(self), FALSE);
 	g_return_val_if_fail(error == NULL || *error == NULL, FALSE);
 
+	/* emulated */
+	if (fu_device_has_flag(FU_DEVICE(self), FWUPD_DEVICE_FLAG_EMULATED))
+		return TRUE;
+
 	/* not open! */
 	if (priv->io_channel == NULL) {
 		g_set_error(error,
@@ -1954,194 +2136,147 @@ fu_udev_device_pwrite(FuUdevDevice *self,
 }
 
 /**
- * fu_udev_device_get_parent_name
+ * fu_udev_device_read_sysfs:
  * @self: a #FuUdevDevice
- *
- * Returns the name of the direct ancestor of this device
- *
- * Returns: string or NULL if unset or invalid
- *
- * Since: 1.4.5
- **/
-gchar *
-fu_udev_device_get_parent_name(FuUdevDevice *self)
-{
-#ifdef HAVE_GUDEV
-	FuUdevDevicePrivate *priv = GET_PRIVATE(self);
-	g_autoptr(GUdevDevice) parent = NULL;
-
-	g_return_val_if_fail(FU_IS_UDEV_DEVICE(self), NULL);
-
-	if (priv->udev_device == NULL)
-		return NULL;
-	parent = g_udev_device_get_parent(priv->udev_device);
-	return parent == NULL ? NULL : g_strdup(g_udev_device_get_name(parent));
-#else
-	return NULL;
-#endif
-}
-
-/**
- * fu_udev_device_get_sysfs_attr:
- * @self: a #FuUdevDevice
- * @attr: name of attribute to get
+ * @attr: sysfs attribute name
+ * @timeout_ms: IO timeout in milliseconds
  * @error: (nullable): optional return location for an error
  *
- * Reads an arbitrary sysfs attribute 'attr' associated with UDEV device
+ * Reads data from a sysfs attribute, removing any newline trailing chars.
  *
- * Returns: string or NULL
+ * Returns: (transfer full): string value, or %NULL
  *
- * Since: 1.4.5
+ * Since: 2.0.0
  **/
-const gchar *
-fu_udev_device_get_sysfs_attr(FuUdevDevice *self, const gchar *attr, GError **error)
+gchar *
+fu_udev_device_read_sysfs(FuUdevDevice *self, const gchar *attr, guint timeout_ms, GError **error)
 {
-#ifdef HAVE_GUDEV
-	FuUdevDevicePrivate *priv = GET_PRIVATE(self);
-	const gchar *result;
+	FuDeviceEvent *event = NULL;
+	g_autofree gchar *event_id = NULL;
+	g_autofree gchar *path = NULL;
+	g_autofree gchar *value = NULL;
+	g_autoptr(FuIOChannel) io_channel = NULL;
+	g_autoptr(GByteArray) buf = NULL;
 
 	g_return_val_if_fail(FU_IS_UDEV_DEVICE(self), NULL);
 	g_return_val_if_fail(attr != NULL, NULL);
 	g_return_val_if_fail(error == NULL || *error == NULL, NULL);
 
-	/* nothing to do */
-	if (priv->udev_device == NULL) {
-		g_set_error_literal(error, FWUPD_ERROR, FWUPD_ERROR_NOT_FOUND, "not initialized");
-		return NULL;
-	}
-	result = g_udev_device_get_sysfs_attr(priv->udev_device, attr);
-	if (result == NULL) {
-		g_set_error(error,
-			    FWUPD_ERROR,
-			    FWUPD_ERROR_NOT_FOUND,
-			    "attribute %s returned no data",
-			    attr);
-		return NULL;
+	/* need event ID */
+	if (fu_device_has_flag(FU_DEVICE(self), FWUPD_DEVICE_FLAG_EMULATED) ||
+	    fu_context_has_flag(fu_device_get_context(FU_DEVICE(self)),
+				FU_CONTEXT_FLAG_SAVE_EVENTS)) {
+		event_id = g_strdup_printf("ReadAttr:Attr=%s", attr);
 	}
 
-	return result;
-#else
-	g_set_error_literal(error,
-			    FWUPD_ERROR,
-			    FWUPD_ERROR_NOT_SUPPORTED,
-			    "getting attributes is not supported as no GUdev support");
-	return NULL;
-#endif
-}
+	/* emulated */
+	if (fu_device_has_flag(FU_DEVICE(self), FWUPD_DEVICE_FLAG_EMULATED)) {
+		event = fu_device_load_event(FU_DEVICE(self), event_id, error);
+		if (event == NULL)
+			return NULL;
+		return g_strdup(fu_device_event_get_str(event, "Data", error));
+	}
 
-/**
- * fu_udev_device_get_sysfs_attr_uint64:
- * @self: a #FuUdevDevice
- * @attr: name of attribute to get
- * @value: (out) (optional): value to return
- * @error: (nullable): optional return location for an error
- *
- * Reads an arbitrary sysfs attribute 'attr' associated with UDEV device as a uint64.
- *
- * Returns: %TRUE for success
- *
- * Since: 1.7.2
- **/
-gboolean
-fu_udev_device_get_sysfs_attr_uint64(FuUdevDevice *self,
-				     const gchar *attr,
-				     guint64 *value,
-				     GError **error)
-{
-	const gchar *tmp;
+	/* save */
+	if (event_id != NULL)
+		event = fu_device_save_event(FU_DEVICE(self), event_id);
 
-	g_return_val_if_fail(FU_IS_UDEV_DEVICE(self), FALSE);
-	g_return_val_if_fail(attr != NULL, FALSE);
-	g_return_val_if_fail(error == NULL || *error == NULL, FALSE);
+	/* open the file */
+	if (fu_udev_device_get_sysfs_path(self) == NULL) {
+		g_set_error_literal(error,
+				    FWUPD_ERROR,
+				    FWUPD_ERROR_INTERNAL,
+				    "sysfs_path undefined");
+		return NULL;
+	}
+	path = g_build_filename(fu_udev_device_get_sysfs_path(self), attr, NULL);
+	io_channel = fu_io_channel_new_file(path, FU_IO_CHANNEL_OPEN_FLAG_READ, error);
+	if (io_channel == NULL)
+		return NULL;
+	buf = fu_io_channel_read_byte_array(io_channel,
+					    -1,
+					    timeout_ms,
+					    FU_IO_CHANNEL_FLAG_NONE,
+					    error);
+	if (buf == NULL)
+		return NULL;
+	if (!g_utf8_validate((const gchar *)buf->data, buf->len, NULL)) {
+		g_set_error_literal(error, FWUPD_ERROR, FWUPD_ERROR_INVALID_DATA, "non UTF-8 data");
+		return NULL;
+	}
 
-	tmp = fu_udev_device_get_sysfs_attr(self, attr, error);
-	if (tmp == NULL)
-		return FALSE;
-	return fu_strtoull(tmp, value, 0, G_MAXUINT64, error);
+	/* save response */
+	value = g_strndup((const gchar *)buf->data, buf->len);
+
+	/* remove the trailing newline */
+	if (buf->len > 0) {
+		if (value[buf->len - 1] == '\n')
+			value[buf->len - 1] = '\0';
+	}
+
+	/* save for emulation */
+	if (event != NULL)
+		fu_device_event_set_str(event, "Data", value);
+
+	/* success */
+	return g_steal_pointer(&value);
 }
 
 /**
  * fu_udev_device_write_sysfs:
  * @self: a #FuUdevDevice
- * @attribute: sysfs attribute name
+ * @attr: sysfs attribute name
  * @val: data to write into the attribute
+ * @timeout_ms: IO timeout in milliseconds
  * @error: (nullable): optional return location for an error
  *
  * Writes data into a sysfs attribute
  *
  * Returns: %TRUE for success
  *
- * Since: 1.4.5
+ * Since: 2.0.0
  **/
 gboolean
 fu_udev_device_write_sysfs(FuUdevDevice *self,
-			   const gchar *attribute,
+			   const gchar *attr,
 			   const gchar *val,
+			   guint timeout_ms,
 			   GError **error)
 {
-#ifdef __linux__
-	ssize_t n;
-	int r;
-	int fd;
 	g_autofree gchar *path = NULL;
+	g_autoptr(FuIOChannel) io_channel = NULL;
 
 	g_return_val_if_fail(FU_IS_UDEV_DEVICE(self), FALSE);
-	g_return_val_if_fail(attribute != NULL, FALSE);
+	g_return_val_if_fail(attr != NULL, FALSE);
 	g_return_val_if_fail(val != NULL, FALSE);
 	g_return_val_if_fail(error == NULL || *error == NULL, FALSE);
 
-	path = g_build_filename(fu_udev_device_get_sysfs_path(self), attribute, NULL);
-	fd = open(path, O_WRONLY | O_CLOEXEC);
-	if (fd < 0) {
-		g_set_error(error,
-			    G_IO_ERROR, /* nocheck */
-			    g_io_error_from_errno(errno),
-			    "could not open %s: %s",
-			    path,
-			    g_strerror(errno));
-		fwupd_error_convert(error);
+	/* emulated */
+	if (fu_device_has_flag(FU_DEVICE(self), FWUPD_DEVICE_FLAG_EMULATED))
+		return TRUE;
+
+	/* open the file */
+	if (fu_udev_device_get_sysfs_path(self) == NULL) {
+		g_set_error_literal(error,
+				    FWUPD_ERROR,
+				    FWUPD_ERROR_INTERNAL,
+				    "sysfs_path undefined");
 		return FALSE;
 	}
-
-	do {
-		n = write(fd, val, strlen(val));
-		if (n < 1 && errno != EINTR) {
-			g_set_error(error,
-				    G_IO_ERROR, /* nocheck */
-				    g_io_error_from_errno(errno),
-				    "could not write to %s: %s",
-				    path,
-				    g_strerror(errno));
-			(void)close(fd);
-			fwupd_error_convert(error);
-			return FALSE;
-		}
-	} while (n < 1);
-
-	r = close(fd);
-	if (r < 0 && errno != EINTR) {
-		g_set_error(error,
-			    G_IO_ERROR, /* nocheck */
-			    g_io_error_from_errno(errno),
-			    "could not close %s: %s",
-			    path,
-			    g_strerror(errno));
-		fwupd_error_convert(error);
+	path = g_build_filename(fu_udev_device_get_sysfs_path(self), attr, NULL);
+	io_channel = fu_io_channel_new_file(path, FU_IO_CHANNEL_OPEN_FLAG_WRITE, error);
+	if (io_channel == NULL)
 		return FALSE;
-	}
-
-	return TRUE;
-#else
-	g_set_error_literal(error,
-			    FWUPD_ERROR,
-			    FWUPD_ERROR_NOT_SUPPORTED,
-			    "sysfs attributes not supported on Windows");
-	return FALSE;
-#endif
+	return fu_io_channel_write_raw(io_channel,
+				       (const guint8 *)val,
+				       strlen(val),
+				       timeout_ms,
+				       FU_IO_CHANNEL_FLAG_NONE,
+				       error);
 }
 
 /**
- * fu_udev_device_get_devtype
+ * fu_udev_device_get_devtype:
  * @self: a #FuUdevDevice
  *
  * Returns the Udev device type
@@ -2153,15 +2288,9 @@ fu_udev_device_write_sysfs(FuUdevDevice *self,
 const gchar *
 fu_udev_device_get_devtype(FuUdevDevice *self)
 {
-#ifdef HAVE_GUDEV
 	FuUdevDevicePrivate *priv = GET_PRIVATE(self);
-
-	if (priv->udev_device == NULL)
-		return NULL;
-	return g_udev_device_get_devtype(priv->udev_device);
-#else
-	return NULL;
-#endif
+	g_return_val_if_fail(FU_IS_UDEV_DEVICE(self), NULL);
+	return priv->devtype;
 }
 
 /**
@@ -2227,54 +2356,6 @@ fu_udev_device_get_siblings_with_subsystem(FuUdevDevice *self,
 }
 
 /**
- * fu_udev_device_get_parent_with_subsystem
- * @self: a #FuUdevDevice
- * @subsystem: (nullable): the name of a udev subsystem
- * @error: (nullable): optional return location for an error
- *
- * Get the device that is a parent of self and has the provided subsystem.
- *
- * Returns: (transfer full): device, or %NULL
- *
- * Since: 2.0.0
- */
-FuUdevDevice *
-fu_udev_device_get_parent_with_subsystem(FuUdevDevice *self, const gchar *subsystem, GError **error)
-{
-#ifdef HAVE_GUDEV
-	FuUdevDevicePrivate *priv = GET_PRIVATE(self);
-	g_autoptr(GUdevDevice) device_tmp = NULL;
-
-	/* sanity check */
-	if (priv->udev_device == NULL) {
-		g_set_error_literal(error, FWUPD_ERROR, FWUPD_ERROR_NOT_FOUND, "not initialized");
-		return NULL;
-	}
-	if (subsystem == NULL) {
-		device_tmp = g_udev_device_get_parent(priv->udev_device);
-	} else {
-		device_tmp =
-		    g_udev_device_get_parent_with_subsystem(priv->udev_device, subsystem, NULL);
-	}
-	if (device_tmp == NULL) {
-		g_set_error(error,
-			    FWUPD_ERROR,
-			    FWUPD_ERROR_NOT_SUPPORTED,
-			    "no parent with subsystem %s",
-			    subsystem);
-		return NULL;
-	}
-	return fu_udev_device_new(fu_device_get_context(FU_DEVICE(self)), device_tmp);
-#else
-	g_set_error_literal(error,
-			    FWUPD_ERROR,
-			    FWUPD_ERROR_NOT_SUPPORTED,
-			    "not supported as <gudev.h> is unavailable");
-	return NULL;
-#endif
-}
-
-/**
  * fu_udev_device_get_children_with_subsystem
  * @self: a #FuUdevDevice
  * @subsystem: the name of a udev subsystem
@@ -2326,71 +2407,93 @@ fu_udev_device_get_children_with_subsystem(FuUdevDevice *self, const gchar *cons
  * @self: a #FuUdevDevice
  * @error: (nullable): optional return location for an error
  *
- * Gets the matching #GUsbDevice for the #GUdevDevice.
+ * Gets the matching #FuUsbDevice for the #GUdevDevice.
  *
  * NOTE: This should never be stored in the device class as an instance variable, as the lifecycle
- * for `GUsbDevice` may be different to the `FuUdevDevice`. Every time the `GUsbDevice` is used
+ * for `FuUsbDevice` may be different to the `FuUdevDevice`. Every time the `FuUsbDevice` is used
  * this function should be called.
  *
- * Returns: (transfer full): a #GUsbDevice, or NULL if unset or invalid
+ * Returns: (transfer full): a #FuUsbDevice, or NULL if unset or invalid
  *
  * Since: 1.8.7
  **/
-GUsbDevice *
+FuDevice *
 fu_udev_device_find_usb_device(FuUdevDevice *self, GError **error)
 {
-#if defined(HAVE_GUDEV) && defined(HAVE_GUSB)
-	FuUdevDevicePrivate *priv = GET_PRIVATE(self);
-	guint8 bus = 0;
-	guint8 address = 0;
-	g_autoptr(GUdevDevice) udev_device = NULL;
-	g_autoptr(GUsbContext) usb_ctx = NULL;
-	g_autoptr(GUsbDevice) usb_device = NULL;
+#if defined(HAVE_GUDEV)
+	guint64 bus = 0;
+	guint64 address = 0;
+	gint rc;
+	libusb_device **dev_list = NULL;
+	g_autofree gchar *attr_bus = NULL;
+	g_autofree gchar *attr_dev = NULL;
+	g_autoptr(FuUdevDevice) udev_device = NULL;
+	g_autoptr(FuUsbDevice) usb_device = NULL;
+	g_autoptr(libusb_context) ctx = NULL;
 
 	g_return_val_if_fail(FU_IS_UDEV_DEVICE(self), NULL);
 	g_return_val_if_fail(error == NULL || *error == NULL, NULL);
 
-	/* sanity check */
-	if (priv->udev_device == NULL) {
-		g_set_error_literal(error, FWUPD_ERROR, FWUPD_ERROR_NOT_FOUND, "not initialized");
-		return NULL;
-	}
-
 	/* look at the current device and all the parent devices until we can find the USB data */
-	udev_device = g_object_ref(priv->udev_device);
-	while (udev_device != NULL) {
-		g_autoptr(GUdevDevice) udev_device_parent = NULL;
-		bus = g_udev_device_get_sysfs_attr_as_int(udev_device, "busnum");
-		address = g_udev_device_get_sysfs_attr_as_int(udev_device, "devnum");
-		if (bus != 0 || address != 0)
+	udev_device = FU_UDEV_DEVICE(
+	    fu_device_get_backend_parent_with_kind(FU_DEVICE(self), "usb:usb_device", error));
+	if (udev_device == NULL)
+		return NULL;
+
+	attr_bus = fu_udev_device_read_sysfs(udev_device,
+					     "busnum",
+					     FU_UDEV_DEVICE_ATTR_READ_TIMEOUT_DEFAULT,
+					     error);
+	if (attr_bus == NULL)
+		return NULL;
+	if (!fu_strtoull(attr_bus, &bus, 0, G_MAXUINT8, FU_INTEGER_BASE_16, error))
+		return NULL;
+	attr_dev = fu_udev_device_read_sysfs(udev_device,
+					     "devnum",
+					     FU_UDEV_DEVICE_ATTR_READ_TIMEOUT_DEFAULT,
+					     error);
+	if (attr_dev == NULL)
+		return NULL;
+	if (!fu_strtoull(attr_dev, &bus, 0, G_MAXUINT8, FU_INTEGER_BASE_16, error))
+		return NULL;
+
+	/* match device with libusb */
+	rc = libusb_init(&ctx);
+	if (rc < 0) {
+		g_set_error(error,
+			    FWUPD_ERROR,
+			    FWUPD_ERROR_INTERNAL,
+			    "failed to init libusb: %s [%i]",
+			    libusb_strerror(rc),
+			    rc);
+		return NULL;
+	}
+	libusb_get_device_list(ctx, &dev_list);
+	for (guint i = 0; dev_list != NULL && dev_list[i] != NULL; i++) {
+		if (libusb_get_bus_number(dev_list[i]) == bus &&
+		    libusb_get_device_address(dev_list[i]) == address) {
+			usb_device =
+			    fu_usb_device_new(fu_device_get_context(FU_DEVICE(self)), dev_list[i]);
 			break;
-		udev_device_parent = g_udev_device_get_parent(udev_device);
-		g_set_object(&udev_device, udev_device_parent);
+		}
 	}
+	libusb_free_device_list(dev_list, 1);
 
-	/* nothing found */
-	if (bus == 0x0 && address == 0x0) {
-		g_set_error_literal(error,
-				    FWUPD_ERROR,
-				    FWUPD_ERROR_NOT_SUPPORTED,
-				    "No parent device with busnum and devnum");
+	if (usb_device == NULL) {
+		g_set_error(error,
+			    FWUPD_ERROR,
+			    FWUPD_ERROR_NOT_SUPPORTED,
+			    "no device with busnum=%02x and devnum=%02x",
+			    (guint)bus,
+			    (guint)address);
 		return NULL;
 	}
-
-	/* match device */
-	usb_ctx = g_usb_context_new(error);
-	if (usb_ctx == NULL)
-		return NULL;
-	usb_device = g_usb_context_find_by_bus_address(usb_ctx, bus, address, error);
-	if (usb_device == NULL)
-		return NULL;
-	g_usb_device_add_tag(usb_device, "is-transient");
-	return g_steal_pointer(&usb_device);
+	return FU_DEVICE(g_steal_pointer(&usb_device));
 #else
 	g_set_error_literal(error,
 			    FWUPD_ERROR,
 			    FWUPD_ERROR_NOT_SUPPORTED,
-			    "Not supported as <gudev.h> or <gusb.h> is unavailable");
+			    "Not supported as <gudev.h> or <libusb.h> is unavailable");
 	return NULL;
 #endif
 }
@@ -2432,10 +2535,19 @@ fu_udev_device_dump_firmware(FuDevice *device, FuProgress *progress, GError **er
 	if (g_str_has_prefix(fn, "/sys")) {
 		g_autoptr(GFileOutputStream) output_stream = NULL;
 		output_stream = g_file_replace(file, NULL, FALSE, G_FILE_CREATE_NONE, NULL, error);
-		if (output_stream == NULL)
+		if (output_stream == NULL) {
+			fu_error_convert(error);
 			return NULL;
-		if (g_output_stream_write(G_OUTPUT_STREAM(output_stream), "1", 1, NULL, error) < 0)
+		}
+		if (!g_output_stream_write_all(G_OUTPUT_STREAM(output_stream),
+					       "1",
+					       1,
+					       NULL,
+					       NULL,
+					       error)) {
+			fu_error_convert(error);
 			return NULL;
+		}
 	}
 
 	/* ensure we got enough data to fill the buffer */
@@ -2462,6 +2574,209 @@ fu_udev_device_dump_firmware(FuDevice *device, FuProgress *progress, GError **er
 	return g_bytes_new(buf->data, buf->len);
 }
 
+/**
+ * fu_udev_device_read_property:
+ * @self: a #FuUdevDevice
+ * @key: uevent key name, e.g. `HID_PHYS`
+ * @error: (nullable): optional return location for an error
+ *
+ * Gets a value from the `uevent` file.
+ *
+ * Returns: %TRUE for success
+ *
+ * Since: 2.0.0
+ **/
+gchar *
+fu_udev_device_read_property(FuUdevDevice *self, const gchar *key, GError **error)
+{
+	FuUdevDevicePrivate *priv = GET_PRIVATE(self);
+	FuDeviceEvent *event = NULL;
+	g_autofree gchar *event_id = NULL;
+	g_autofree gchar *value = NULL;
+
+	g_return_val_if_fail(FU_IS_UDEV_DEVICE(self), NULL);
+	g_return_val_if_fail(key != NULL, NULL);
+	g_return_val_if_fail(error == NULL || *error == NULL, NULL);
+
+	/* need event ID */
+	if (fu_device_has_flag(FU_DEVICE(self), FWUPD_DEVICE_FLAG_EMULATED) ||
+	    fu_context_has_flag(fu_device_get_context(FU_DEVICE(self)),
+				FU_CONTEXT_FLAG_SAVE_EVENTS)) {
+		event_id = g_strdup_printf("ReadProp:Key=%s", key);
+	}
+
+	/* emulated */
+	if (fu_device_has_flag(FU_DEVICE(self), FWUPD_DEVICE_FLAG_EMULATED)) {
+		event = fu_device_load_event(FU_DEVICE(self), event_id, error);
+		if (event == NULL)
+			return NULL;
+		return g_strdup(fu_device_event_get_str(event, "Data", error));
+	}
+
+	/* sanity check */
+	if (priv->udev_device == NULL) {
+		g_set_error_literal(error, FWUPD_ERROR, FWUPD_ERROR_INTERNAL, "no device to use");
+		return NULL;
+	}
+
+	/* save */
+	if (event_id != NULL)
+		event = fu_device_save_event(FU_DEVICE(self), event_id);
+
+#ifdef HAVE_GUDEV
+	/* parse key */
+	value = g_strdup(g_udev_device_get_property(priv->udev_device, key));
+	if (value == NULL) {
+		g_set_error(error,
+			    FWUPD_ERROR,
+			    FWUPD_ERROR_NOT_FOUND,
+			    "property key %s was not found",
+			    key);
+		return NULL;
+	}
+#else
+	g_set_error_literal(error,
+			    FWUPD_ERROR,
+			    FWUPD_ERROR_NOT_SUPPORTED,
+			    "not supported as <gudev.h> is unavailable");
+	return NULL;
+#endif
+
+	/* save response */
+	if (event != NULL)
+		fu_device_event_set_str(event, "Data", value);
+
+	/* success */
+	return g_steal_pointer(&value);
+}
+
+static void
+fu_udev_device_add_json(FwupdCodec *codec, JsonBuilder *builder, FwupdCodecFlags flags)
+{
+	FuDevice *device = FU_DEVICE(codec);
+	FuUdevDevice *self = FU_UDEV_DEVICE(codec);
+	FuUdevDevicePrivate *priv = GET_PRIVATE(self);
+	GPtrArray *events = fu_device_get_events(device);
+
+	/* optional properties */
+	if (fu_udev_device_get_sysfs_path(self) != NULL)
+		fwupd_codec_json_append(builder, "BackendId", fu_udev_device_get_sysfs_path(self));
+	if (priv->device_file != NULL)
+		fwupd_codec_json_append(builder, "DeviceFile", priv->device_file);
+	if (priv->subsystem != NULL)
+		fwupd_codec_json_append(builder, "Subsystem", priv->subsystem);
+	if (priv->driver != NULL)
+		fwupd_codec_json_append(builder, "Driver", priv->driver);
+	if (priv->bind_id != NULL)
+		fwupd_codec_json_append(builder, "BindId", priv->bind_id);
+	if (priv->vendor != 0)
+		fwupd_codec_json_append_int(builder, "Vendor", priv->vendor);
+	if (priv->model != 0)
+		fwupd_codec_json_append_int(builder, "Model", priv->model);
+	if (priv->subsystem_vendor != 0)
+		fwupd_codec_json_append_int(builder, "SubsystemVendor", priv->subsystem_vendor);
+	if (priv->subsystem_model != 0)
+		fwupd_codec_json_append_int(builder, "SubsystemModel", priv->subsystem_model);
+	if (priv->class != 0)
+		fwupd_codec_json_append_int(builder, "PciClass", priv->class);
+	if (priv->revision != 0)
+		fwupd_codec_json_append_int(builder, "Revision", priv->revision);
+	if (priv->number != 0)
+		fwupd_codec_json_append_int(builder, "Number", priv->number);
+
+#if GLIB_CHECK_VERSION(2, 80, 0)
+	if (fu_device_get_created_usec(device) != 0) {
+		g_autoptr(GDateTime) dt =
+		    g_date_time_new_from_unix_utc_usec(fu_device_get_created_usec(device));
+		g_autofree gchar *str = g_date_time_format_iso8601(dt);
+		json_builder_set_member_name(builder, "Created");
+		json_builder_add_string_value(builder, str);
+	}
+#endif
+
+	/* events */
+	if (events->len > 0) {
+		json_builder_set_member_name(builder, "Events");
+		json_builder_begin_array(builder);
+		for (guint i = 0; i < events->len; i++) {
+			FuDeviceEvent *event = g_ptr_array_index(events, i);
+			fwupd_codec_to_json(FWUPD_CODEC(event), builder, flags);
+		}
+		json_builder_end_array(builder);
+	}
+}
+
+static gboolean
+fu_udev_device_from_json(FwupdCodec *codec, JsonNode *json_node, GError **error)
+{
+	FuDevice *device = FU_DEVICE(codec);
+	FuUdevDevice *self = FU_UDEV_DEVICE(codec);
+	JsonObject *json_object = json_node_get_object(json_node);
+	const gchar *tmp;
+	gint64 tmp64;
+
+	tmp = json_object_get_string_member_with_default(json_object, "BackendId", NULL);
+	if (tmp != NULL)
+		fu_device_set_backend_id(device, tmp);
+	tmp = json_object_get_string_member_with_default(json_object, "Subsystem", NULL);
+	if (tmp != NULL)
+		fu_udev_device_set_subsystem(self, tmp);
+	tmp = json_object_get_string_member_with_default(json_object, "Driver", NULL);
+	if (tmp != NULL)
+		fu_udev_device_set_driver(self, tmp);
+	tmp = json_object_get_string_member_with_default(json_object, "BindId", NULL);
+	if (tmp != NULL)
+		fu_udev_device_set_bind_id(self, tmp);
+	tmp = json_object_get_string_member_with_default(json_object, "DeviceFile", NULL);
+	if (tmp != NULL)
+		fu_udev_device_set_device_file(self, tmp);
+	tmp64 = json_object_get_int_member_with_default(json_object, "Vendor", 0);
+	if (tmp64 != 0)
+		fu_udev_device_set_vendor(self, tmp64);
+	tmp64 = json_object_get_int_member_with_default(json_object, "Model", 0);
+	if (tmp64 != 0)
+		fu_udev_device_set_model(self, tmp64);
+	tmp64 = json_object_get_int_member_with_default(json_object, "SubsystemVendor", 0);
+	if (tmp64 != 0)
+		fu_udev_device_set_subsystem_vendor(self, tmp64);
+	tmp64 = json_object_get_int_member_with_default(json_object, "SubsystemModel", 0);
+	if (tmp64 != 0)
+		fu_udev_device_set_subsystem_model(self, tmp64);
+	tmp64 = json_object_get_int_member_with_default(json_object, "PciClass", 0);
+	if (tmp64 != 0)
+		fu_udev_device_set_cls(self, tmp64);
+	tmp64 = json_object_get_int_member_with_default(json_object, "Revision", 0);
+	if (tmp64 != 0)
+		fu_udev_device_set_revision(self, tmp64);
+	tmp64 = json_object_get_int_member_with_default(json_object, "Number", 0);
+	if (tmp64 != 0)
+		fu_udev_device_set_number(self, tmp64);
+
+#if GLIB_CHECK_VERSION(2, 80, 0)
+	tmp = json_object_get_string_member_with_default(json_object, "Created", NULL);
+	if (tmp != NULL) {
+		g_autoptr(GDateTime) dt = g_date_time_new_from_iso8601(tmp, NULL);
+		if (dt != NULL)
+			fu_device_set_created_usec(device, g_date_time_to_unix_usec(dt));
+	}
+#endif
+
+	/* array of events */
+	if (json_object_has_member(json_object, "Events")) {
+		JsonArray *json_array = json_object_get_array_member(json_object, "Events");
+		for (guint i = 0; i < json_array_get_length(json_array); i++) {
+			JsonNode *node_tmp = json_array_get_element(json_array, i);
+			g_autoptr(FuDeviceEvent) event = fu_device_event_new(NULL);
+			if (!fwupd_codec_from_json(FWUPD_CODEC(event), node_tmp, error))
+				return FALSE;
+			fu_device_add_event(device, event);
+		}
+	}
+
+	/* success */
+	return TRUE;
+}
+
 static void
 fu_udev_device_get_property(GObject *object, guint prop_id, GValue *value, GParamSpec *pspec)
 {
@@ -2482,6 +2797,9 @@ fu_udev_device_get_property(GObject *object, guint prop_id, GValue *value, GPara
 		break;
 	case PROP_DEVICE_FILE:
 		g_value_set_string(value, priv->device_file);
+		break;
+	case PROP_DEVTYPE:
+		g_value_set_string(value, priv->devtype);
 		break;
 	default:
 		G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
@@ -2509,6 +2827,9 @@ fu_udev_device_set_property(GObject *object, guint prop_id, const GValue *value,
 	case PROP_DEVICE_FILE:
 		fu_udev_device_set_device_file(self, g_value_get_string(value));
 		break;
+	case PROP_DEVTYPE:
+		fu_udev_device_set_devtype(self, g_value_get_string(value));
+		break;
 	default:
 		G_OBJECT_WARN_INVALID_PROPERTY_ID(object, prop_id, pspec);
 		break;
@@ -2522,6 +2843,7 @@ fu_udev_device_finalize(GObject *object)
 	FuUdevDevicePrivate *priv = GET_PRIVATE(self);
 
 	g_free(priv->subsystem);
+	g_free(priv->devtype);
 	g_free(priv->bind_id);
 	g_free(priv->driver);
 	g_free(priv->device_file);
@@ -2647,6 +2969,27 @@ fu_udev_device_class_init(FuUdevDeviceClass *klass)
 				    NULL,
 				    G_PARAM_READWRITE | G_PARAM_STATIC_NAME);
 	g_object_class_install_property(object_class, PROP_DEVICE_FILE, pspec);
+
+	/**
+	 * FuUdevDevice:devtype:
+	 *
+	 * The device type.
+	 *
+	 * Since: 2.0.0
+	 */
+	pspec = g_param_spec_string("devtype",
+				    NULL,
+				    NULL,
+				    NULL,
+				    G_PARAM_READWRITE | G_PARAM_STATIC_NAME);
+	g_object_class_install_property(object_class, PROP_DEVTYPE, pspec);
+}
+
+static void
+fu_udev_device_codec_iface_init(FwupdCodecInterface *iface)
+{
+	iface->add_json = fu_udev_device_add_json;
+	iface->from_json = fu_udev_device_from_json;
 }
 
 /**

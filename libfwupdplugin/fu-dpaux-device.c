@@ -61,7 +61,7 @@ fu_dpaux_device_invalidate(FuDevice *device)
 static gboolean
 fu_dpaux_device_probe(FuDevice *device, GError **error)
 {
-	const gchar *tmp;
+	g_autofree gchar *attr_name = NULL;
 
 	/* FuUdevDevice->probe */
 	if (!FU_DEVICE_CLASS(fu_dpaux_device_parent_class)->probe(device, error))
@@ -80,9 +80,12 @@ fu_dpaux_device_probe(FuDevice *device, GError **error)
 		return FALSE;
 
 	/* only populated on real system, test suite won't have udev_device set */
-	tmp = fu_udev_device_get_sysfs_attr(FU_UDEV_DEVICE(device), "name", NULL);
-	if (tmp != NULL)
-		fu_device_set_name(device, tmp);
+	attr_name = fu_udev_device_read_sysfs(FU_UDEV_DEVICE(device),
+					      "name",
+					      FU_UDEV_DEVICE_ATTR_READ_TIMEOUT_DEFAULT,
+					      NULL);
+	if (attr_name != NULL)
+		fu_device_set_name(device, attr_name);
 
 	return TRUE;
 }
@@ -439,9 +442,9 @@ fu_dpaux_device_init(FuDpauxDevice *self)
 {
 	fu_device_set_version_format(FU_DEVICE(self), FWUPD_VERSION_FORMAT_TRIPLET);
 	fu_device_add_internal_flag(FU_DEVICE(self), FU_DEVICE_INTERNAL_FLAG_NO_GENERIC_GUIDS);
-	fu_udev_device_add_flag(FU_UDEV_DEVICE(self), FU_UDEV_DEVICE_FLAG_OPEN_READ);
-	fu_udev_device_add_flag(FU_UDEV_DEVICE(self), FU_UDEV_DEVICE_FLAG_OPEN_WRITE);
-	fu_udev_device_add_flag(FU_UDEV_DEVICE(self), FU_UDEV_DEVICE_FLAG_OPEN_NONBLOCK);
+	fu_udev_device_add_open_flag(FU_UDEV_DEVICE(self), FU_IO_CHANNEL_OPEN_FLAG_READ);
+	fu_udev_device_add_open_flag(FU_UDEV_DEVICE(self), FU_IO_CHANNEL_OPEN_FLAG_WRITE);
+	fu_udev_device_add_open_flag(FU_UDEV_DEVICE(self), FU_IO_CHANNEL_OPEN_FLAG_NONBLOCK);
 }
 
 static void

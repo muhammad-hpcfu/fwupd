@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 #
 # Copyright 2021 Richard Hughes <richard@hughsie.com>
 # Copyright 2021 Mario Limonciello <superm1@gmail.com>
@@ -42,7 +42,7 @@ def test_files() -> int:
         lic: str = ""
         cprts: list[str] = []
         lines: list[str] = []
-        with open(fn, "r") as f:
+        with open(fn) as f:
             for line in f.read().split("\n"):
                 lines.append(line)
         if len(lines) < 2:

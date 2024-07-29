@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 #
 # Copyright 2022 Richard Hughes <richard@hughsie.com>
 #
@@ -29,7 +29,7 @@ if __name__ == "__main__":
 
     for fn in fns:
         modified: bool = False
-        with open(fn, "r") as f:
+        with open(fn) as f:
             buf = f.read()
         for old, new in {
             "fu_common_sum8": "fu_sum8",
@@ -47,7 +47,7 @@ if __name__ == "__main__":
             "fu_common_crc16": "fu_crc16",
             "fu_common_crc16_full": "fu_crc16_full",
             "fu_common_crc32": "fu_crc32",
-            "fu_common_crc32_full": "fu_crc32_full",
+            "fu_common_crc32_full": "fu_crc32",
             "fu_byte_array_set_size_full": "fu_byte_array_set_size",
             "fu_common_string_replace": "g_string_replace",
             "fu_common_string_append_kv": "fwupd_codec_string_append",

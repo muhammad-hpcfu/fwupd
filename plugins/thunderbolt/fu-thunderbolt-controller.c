@@ -80,20 +80,29 @@ static gboolean
 fu_thunderbolt_controller_probe(FuDevice *device, GError **error)
 {
 	FuThunderboltController *self = FU_THUNDERBOLT_CONTROLLER(device);
-	const gchar *unique_id;
-	g_autofree gchar *parent_name = NULL;
+	const gchar *parent_name = NULL;
+	g_autofree gchar *attr_unique_id = NULL;
+	g_autoptr(FuDevice) device_parent = NULL;
 
 	/* FuUdevDevice->probe */
 	if (!FU_DEVICE_CLASS(fu_thunderbolt_controller_parent_class)->probe(device, error))
 		return FALSE;
 
 	/* determine if host controller or not */
-	parent_name = fu_udev_device_get_parent_name(FU_UDEV_DEVICE(self));
+	device_parent = fu_device_get_backend_parent_with_kind(FU_DEVICE(self),
+							       "thunderbolt:thunderbolt_domain",
+							       NULL);
+	if (device_parent != NULL)
+		parent_name = fu_device_get_name(device_parent);
 	if (parent_name != NULL && g_str_has_prefix(parent_name, "domain"))
 		self->controller_kind = FU_THUNDERBOLT_CONTROLLER_KIND_HOST;
-	unique_id = fu_udev_device_get_sysfs_attr(FU_UDEV_DEVICE(device), "unique_id", NULL);
-	if (unique_id != NULL)
-		fu_device_set_physical_id(device, unique_id);
+
+	attr_unique_id = fu_udev_device_read_sysfs(FU_UDEV_DEVICE(device),
+						   "unique_id",
+						   FU_UDEV_DEVICE_ATTR_READ_TIMEOUT_DEFAULT,
+						   NULL);
+	if (attr_unique_id != NULL)
+		fu_device_set_physical_id(device, attr_unique_id);
 
 	/* success */
 	return TRUE;
@@ -182,12 +191,11 @@ static void
 fu_thunderbolt_controller_set_signed(FuDevice *device)
 {
 	FuThunderboltController *self = FU_THUNDERBOLT_CONTROLLER(device);
-	GUdevDevice *udev_device = fu_udev_device_get_dev(FU_UDEV_DEVICE(device));
-	const gchar *tmp;
+	g_autofree gchar *prop_type = NULL;
 
 	/* if it's a USB4 type not of host and generation 3; it's Intel */
-	tmp = g_udev_device_get_property(udev_device, "USB4_TYPE");
-	if (g_strcmp0(tmp, "host") != 0 && self->gen == 3)
+	prop_type = fu_udev_device_read_property(FU_UDEV_DEVICE(self), "USB4_TYPE", NULL);
+	if (g_strcmp0(prop_type, "host") != 0 && self->gen == 3)
 		fu_device_add_flag(device, FWUPD_DEVICE_FLAG_SIGNED_PAYLOAD);
 }
 
@@ -195,9 +203,11 @@ static gboolean
 fu_thunderbolt_controller_setup(FuDevice *device, GError **error)
 {
 	FuThunderboltController *self = FU_THUNDERBOLT_CONTROLLER(device);
-	const gchar *tmp = NULL;
 	guint16 did;
 	guint16 vid;
+	g_autofree gchar *attr_device_name = NULL;
+	g_autofree gchar *attr_nvm_authenticate_on_disconnect = NULL;
+	g_autofree gchar *attr_vendor_name = NULL;
 	g_autoptr(GError) error_gen = NULL;
 	g_autoptr(GError) error_version = NULL;
 
@@ -230,18 +240,25 @@ fu_thunderbolt_controller_setup(FuDevice *device, GError **error)
 		fu_device_add_flag(device, FWUPD_DEVICE_FLAG_INTERNAL);
 		fu_device_set_summary(device, "Unmatched performance for high-speed I/O");
 	} else {
-		tmp = fu_udev_device_get_sysfs_attr(FU_UDEV_DEVICE(self), "device_name", NULL);
+		attr_device_name =
+		    fu_udev_device_read_sysfs(FU_UDEV_DEVICE(self),
+					      "device_name",
+					      FU_UDEV_DEVICE_ATTR_READ_TIMEOUT_DEFAULT,
+					      NULL);
 	}
 
 	/* set the controller name */
-	if (tmp == NULL)
-		tmp = fu_thunderbolt_controller_kind_to_string(self);
-	fu_device_set_name(device, tmp);
+	if (attr_device_name == NULL)
+		attr_device_name = g_strdup(fu_thunderbolt_controller_kind_to_string(self));
+	fu_device_set_name(device, attr_device_name);
 
 	/* set vendor string */
-	tmp = fu_udev_device_get_sysfs_attr(FU_UDEV_DEVICE(self), "vendor_name", NULL);
-	if (tmp != NULL)
-		fu_device_set_vendor(device, tmp);
+	attr_vendor_name = fu_udev_device_read_sysfs(FU_UDEV_DEVICE(self),
+						     "vendor_name",
+						     FU_UDEV_DEVICE_ATTR_READ_TIMEOUT_DEFAULT,
+						     NULL);
+	if (attr_vendor_name != NULL)
+		fu_device_set_vendor(device, attr_vendor_name);
 
 	if (fu_device_get_version(device) == NULL)
 		fu_thunderbolt_controller_check_safe_mode(self);
@@ -297,9 +314,12 @@ fu_thunderbolt_controller_setup(FuDevice *device, GError **error)
 	}
 
 	/* determine if we can update on unplug */
-	if (fu_udev_device_get_sysfs_attr(FU_UDEV_DEVICE(device),
-					  "nvm_authenticate_on_disconnect",
-					  NULL) != NULL) {
+	attr_nvm_authenticate_on_disconnect =
+	    fu_udev_device_read_sysfs(FU_UDEV_DEVICE(device),
+				      "nvm_authenticate_on_disconnect",
+				      FU_UDEV_DEVICE_ATTR_READ_TIMEOUT_DEFAULT,
+				      NULL);
+	if (attr_nvm_authenticate_on_disconnect != NULL) {
 		fu_thunderbolt_device_set_auth_method(FU_THUNDERBOLT_DEVICE(self),
 						      "nvm_authenticate_on_disconnect");
 		/* flushes image */

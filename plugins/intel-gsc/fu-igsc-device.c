@@ -25,8 +25,9 @@ struct _FuIgscDevice {
 #define FU_IGSC_DEVICE_FLAG_HAS_AUX   (1 << 0)
 #define FU_IGSC_DEVICE_FLAG_HAS_OPROM (1 << 1)
 
-#define FU_IGSC_DEVICE_MEI_WRITE_TIMEOUT 60000	/* 60 sec */
-#define FU_IGSC_DEVICE_MEI_READ_TIMEOUT	 480000 /* 480 sec */
+#define FU_IGSC_DEVICE_POWER_WRITE_TIMEOUT 1500	  /* ms */
+#define FU_IGSC_DEVICE_MEI_WRITE_TIMEOUT   60000  /* 60 sec */
+#define FU_IGSC_DEVICE_MEI_READ_TIMEOUT	   480000 /* 480 sec */
 
 G_DEFINE_TYPE(FuIgscDevice, fu_igsc_device, FU_TYPE_MEI_DEVICE)
 
@@ -439,7 +440,7 @@ fu_igsc_device_get_fw_status(FuIgscDevice *self, guint line, guint32 *fw_status,
 		return FALSE;
 	}
 	hex = g_strdup_printf("0x%s", tmp);
-	if (!fu_strtoull(hex, &tmp64, 0x1, G_MAXUINT32 - 0x1, error)) {
+	if (!fu_strtoull(hex, &tmp64, 0x1, G_MAXUINT32 - 0x1, FU_INTEGER_BASE_AUTO, error)) {
 		g_prefix_error(error, "fw_status %s is invalid: ", tmp);
 		return FALSE;
 	}
@@ -758,13 +759,17 @@ fu_igsc_device_write_firmware(FuDevice *device,
 static gboolean
 fu_igsc_device_set_pci_power_policy(FuIgscDevice *self, const gchar *val, GError **error)
 {
-	g_autoptr(FuUdevDevice) parent = NULL;
+	g_autoptr(FuDevice) parent = NULL;
 
 	/* get PCI parent */
-	parent = fu_udev_device_get_parent_with_subsystem(FU_UDEV_DEVICE(self), "pci", error);
+	parent = fu_device_get_backend_parent_with_kind(FU_DEVICE(self), "pci", error);
 	if (parent == NULL)
 		return FALSE;
-	return fu_udev_device_write_sysfs(parent, "power/control", val, error);
+	return fu_udev_device_write_sysfs(FU_UDEV_DEVICE(parent),
+					  "power/control",
+					  val,
+					  FU_IGSC_DEVICE_POWER_WRITE_TIMEOUT,
+					  error);
 }
 
 static gboolean
