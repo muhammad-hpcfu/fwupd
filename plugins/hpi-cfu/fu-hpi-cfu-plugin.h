@@ -1,6 +1,7 @@
 /*
- * Copyright 2024 Owner Name <owner.name@hp.com>
+ * Copyright 2024 Owner Name <ananth.kunchaka@hp.com>
  *
+ * SPDX-License-Identifier: LGPL-2.1-or-later
  */
 
 #pragma once

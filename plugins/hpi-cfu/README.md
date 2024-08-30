@@ -1,7 +1,3 @@
-
-title: Plugin: HPI-CFU (HP USB Dock Station Firmware Update)
-
-
 ## Introduction
 
 The plugin used for updating firmware on Fleetwood/Hendrix Docking Stations of HP devices.
@@ -31,20 +27,6 @@ the Revision number, e.g.
 
 * `USB\VID_03F0&PID_0BAF`
 * `USB\VID_03F0&PID_0BAF&REV_0001`
-
-## Quirk Use
-
-This hpi-cfu plugin does not implement following plugin-specific quirks as hpi-cfu has its own implementation for these:
-
-### CfuVersionGetReport
-
-### CfuOfferSetReport
-
-### CfuOfferGetReport
-
-### CfuContentSetReport
-
-### CfuContentGetReport
 
 
 

@@ -1,6 +1,7 @@
 /*
- * Copyright 2024 Owner Name <owner.name@hp.com>
+ * Copyright 2024 Owner Name <ananth.kunchaka@hp.com>
  *
+ * SPDX-License-Identifier: LGPL-2.1-or-later
  */
 
 #include "config.h"
@@ -23,7 +24,7 @@ static void
 fu_hpi_cfu_plugin_constructed(GObject *obj)
 {
 	FuPlugin *plugin = FU_PLUGIN(obj);
-	//FuContext *ctx = fu_plugin_get_context(plugin);
+	// FuContext *ctx = fu_plugin_get_context(plugin);
 	fu_plugin_add_device_gtype(plugin, FU_TYPE_HPI_CFU_DEVICE);
 }
 
